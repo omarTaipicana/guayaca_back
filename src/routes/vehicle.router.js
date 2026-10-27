@@ -1,11 +1,2 @@
-import { Router } from "express";
-import { auth, allow, admin } from "../middlewares/verifyJWT.js";
-import { upload } from "../middlewares/upload.js";
-import {
-  vehiclesGet,
-  vehiclesPost,
-} from "../controllers/vehicle.controllers.js";
-const router = Router();
-router.get("/api/vehicles", auth, allow("viajes"), vehiclesGet);
-router.post("/api/vehicles", auth, admin, vehiclesPost);
-export default router;
+import {Router} from 'express';import {auth,allow,admin} from '../middlewares/verifyJWT.js';import {upload} from '../middlewares/upload.js';import {vehiclesGet,vehiclesPost,vehiclePatch,vehiclePhoto} from '../controllers/vehicle.controllers.js';
+const router=Router();router.get('/api/vehicles',auth,allow('viajes'),vehiclesGet);router.post('/api/vehicles',auth,admin,upload.single('photo'),vehiclesPost);router.patch('/api/vehicles/:id',auth,admin,upload.single('photo'),vehiclePatch);router.get('/api/vehicles/:id/photo',auth,admin,vehiclePhoto);export default router;

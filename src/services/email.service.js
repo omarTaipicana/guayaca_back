@@ -27,8 +27,8 @@ export function createMailTransport() {
   });
 }
 
-export async function sendMail(to, subject, text) {
+export async function sendMail(to, subject, text, html) {
   const transport = createMailTransport();
-  try { return await transport.sendMail({from: process.env.SMTP_FROM, to, subject, text}); }
+  try { return await transport.sendMail({from: process.env.SMTP_FROM, to, subject, text, html}); }
   finally { transport.close(); }
 }

@@ -2,8 +2,10 @@ import "dotenv/config";
 import { Umzug, SequelizeStorage } from "umzug";
 import sequelize from "../utils/connection.js";
 import * as initial from "../migrations/001-initial.js";
+import * as vehicleDetails from "../migrations/002-vehicle-details.js";
+import * as userProfile from "../migrations/003-user-profile.js";
 const migrator = new Umzug({
-  migrations: [initial],
+  migrations: [initial, vehicleDetails, userProfile],
   context: sequelize,
   storage: new SequelizeStorage({ sequelize, tableName: "guayaca_migrations" }),
   logger: console,

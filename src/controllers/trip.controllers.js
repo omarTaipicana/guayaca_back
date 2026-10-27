@@ -21,7 +21,7 @@ export const tripsGet = wrap(async (req, res) => {
   let trips = await Trip.findAll({
     where,
     include: [
-      { model: User, as: "driverUser", attributes: ["name"] },
+      { model: User, as: "driverUser", attributes: ["name", "last_name"] },
       { model: Vehicle, as: "vehicle", attributes: ["plate"] },
       { model: Expense, as: "expenses", attributes: ["amount"] },
     ],
@@ -37,7 +37,7 @@ export const tripsGet = wrap(async (req, res) => {
       delete x.expenses;
       return {
         ...x,
-        driver: t.driverUser?.name,
+        driver: [t.driverUser?.name, t.driverUser?.last_name].filter(Boolean).join(" "),
         plate: t.vehicle?.plate,
         expenses: sum.toFixed(2),
       };

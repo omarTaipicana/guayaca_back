@@ -1,1 +1,1 @@
-export const health = (req, res) => res.json({ ok: true, version: "0.2.1" });
+export const health = (req, res) => res.json({ ok: true, version: "0.2.4" });

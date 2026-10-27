@@ -1,16 +1,14 @@
-import { Vehicle, wrap, fail, audit } from "../services/shared.service.js";
-export const vehiclesGet = wrap(async (req, res) =>
-  res.json(await Vehicle.findAll({ order: [["plate", "ASC"]] })),
-);
-export const vehiclesPost = wrap(async (req, res) => {
-  let plate = String(req.body.plate || "")
-    .trim()
-    .toUpperCase();
-  if (!plate) fail(400, "Ingrese la placa");
-  let v = await Vehicle.create({
-    plate,
-    description: String(req.body.description || ""),
-  });
-  await audit(req.user, "crear_vehiculo", { vehicle_id: v.id });
-  res.json(v);
-});
+import {Vehicle,wrap,fail,audit,fs,path,crypto,sharp,uploadDir} from '../services/shared.service.js';
+const photoDir=path.join(uploadDir,'vehicle-photos');
+const fields=['description','brand','model','chassis_number','engine_number','color'];
+function vehicleData(v){let data=v.get({plain:true});data.has_photo=Boolean(data.photo_filename);delete data.photo_filename;return data}
+function parseBody(body,partial=false){let data={};if(!partial||body.plate!==undefined){data.plate=String(body.plate||'').trim().toUpperCase();if(!data.plate||data.plate.length>30)fail(400,'La placa es obligatoria y debe tener hasta 30 caracteres')}
+for(let name of fields){if(body[name]!==undefined){let value=String(body[name]||'').trim();let max=name==='description'?500:name==='color'?80:120;if(value.length>max)fail(400,`El campo ${name} supera el tamaño permitido`);data[name]=name==='description'?value:value||null}}
+if(body.model_year!==undefined){let value=String(body.model_year).trim();if(!value)data.model_year=null;else{let n=Number(value);if(!Number.isInteger(n)||n<1900||n>2100)fail(400,'Ingrese un año válido entre 1900 y 2100');data.model_year=n}}
+if(body.capacity_tons!==undefined){let value=String(body.capacity_tons).trim();if(!value)data.capacity_tons=null;else{let n=Number(value);if(!Number.isFinite(n)||n<0||n>99999999||!/^\d+(?:\.\d{1,2})?$/.test(value))fail(400,'Capacidad inválida; use hasta dos decimales');data.capacity_tons=n}}
+return data;}
+async function savePhoto(file){if(!file)return null;let buffer;try{let image=sharp(file.buffer,{limitInputPixels:40000000});let meta=await image.metadata();if(!['jpeg','png','webp'].includes(meta.format))fail(400,'La foto debe ser JPEG, PNG o WebP');buffer=await image.rotate().resize({width:1600,height:1200,fit:'inside',withoutEnlargement:true}).jpeg({quality:84}).toBuffer()}catch(e){if(e.status)throw e;fail(400,'La fotografía no es válida')}await fs.mkdir(photoDir,{recursive:true});let name=crypto.randomUUID()+'.jpg';await fs.writeFile(path.join(photoDir,name),buffer,{flag:'wx'});return {name,bytes:buffer.length}}
+export const vehiclesGet=wrap(async(req,res)=>{let list=await Vehicle.findAll({order:[['plate','ASC']]});res.json(list.map(v=>req.user.role==='admin'?vehicleData(v):({id:v.id,plate:v.plate,description:v.description,active:v.active})))});
+export const vehiclesPost=wrap(async(req,res)=>{let data=parseBody(req.body),photo=await savePhoto(req.file),v;try{if(photo){data.photo_filename=photo.name;data.photo_bytes=photo.bytes}v=await Vehicle.create(data)}catch(e){if(photo)await fs.unlink(path.join(photoDir,photo.name)).catch(()=>{});throw e}await audit(req.user,'crear_vehiculo',{vehicle_id:v.id});res.json(vehicleData(v))});
+export const vehiclePatch=wrap(async(req,res)=>{let v=await Vehicle.findByPk(req.params.id);if(!v)fail(404,'Vehículo no encontrado');let data=parseBody(req.body,true),photo=await savePhoto(req.file),old=v.photo_filename;try{if(photo){data.photo_filename=photo.name;data.photo_bytes=photo.bytes}await v.update(data)}catch(e){if(photo)await fs.unlink(path.join(photoDir,photo.name)).catch(()=>{});throw e}if(photo&&old)await fs.unlink(path.join(photoDir,path.basename(old))).catch(()=>{});await audit(req.user,'editar_vehiculo',{vehicle_id:v.id});res.json(vehicleData(v))});
+export const vehiclePhoto=wrap(async(req,res)=>{let v=await Vehicle.findByPk(req.params.id);if(!v?.photo_filename)fail(404,'Fotografía no disponible');res.type('image/jpeg');res.setHeader('Cache-Control','private, no-store');res.sendFile(path.join(photoDir,path.basename(v.photo_filename)))})

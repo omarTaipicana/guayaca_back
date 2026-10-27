@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs/promises";
 import {smtpConfigured, sendMail} from "./email.service.js";
+import {securityEmail} from "./emailTemplates.service.js";
 import sharp from "sharp";
 import { Op, literal } from "sequelize";
 import {
@@ -45,11 +46,8 @@ async function challenge(user, type) {
     expires_at: new Date(Date.now() + 600000),
   });
   try {
-    await send(
-      user.email,
-      "GUAYACA código de seguridad",
-      `Su código es ${code}. Válido por 10 minutos. No lo comparta.`,
-    );
+    const email = securityEmail(type, code);
+    await send(user.email, email.subject, email.text, email.html);
   } catch (e) {
     await Challenge.destroy({ where: { id } });
     throw e;
@@ -86,6 +84,14 @@ async function consume(id, code, type) {
 const safe = (u) => ({
   id: u.id,
   name: u.name,
+  last_name: u.last_name,
+  document_number: u.document_number,
+  birth_date: u.birth_date,
+  sex: u.sex,
+  phone: u.phone,
+  has_photo: Boolean(u.photo_filename),
+  photo_bytes: u.photo_bytes,
+  setup_pending: u.setup_pending,
   email: u.email,
   role: u.role,
   permissions: u.permissions,

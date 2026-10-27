@@ -10,7 +10,7 @@ const auth = wrap(async (req, res, next) => {
     return res.status(401).json({ error: "Sesión inválida o vencida" });
   }
   const u = await User.findByPk(p.sub);
-  if (!u || !u.active || u.session_version !== p.sv)
+  if (!u || !u.active || u.setup_pending || u.session_version !== p.sv)
     return res.status(401).json({ error: "Sesión inválida o vencida" });
   req.user = u;
   next();

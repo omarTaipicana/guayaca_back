@@ -1,3 +1,5 @@
+import {activateAccount} from "../services/invitation.service.js";
+import {requestPasswordReset, resetPassword} from "../services/passwordRecovery.service.js";
 import {
   bcrypt,
   User,
@@ -18,6 +20,7 @@ export const loginPost = wrap(async (req, res) => {
   if (
     !u ||
     !u.active ||
+    u.setup_pending ||
     !(await bcrypt.compare(String(req.body.password || ""), u.password_hash))
   )
     fail(401, "Credenciales incorrectas o usuario inactivo");
@@ -61,3 +64,8 @@ export const logoutPost = wrap(async (req, res) => {
   await audit(req.user, "cierre_sesion");
   res.json({ ok: true });
 });
+
+export const forgotPasswordPost = wrap(async (req, res) => res.json(await requestPasswordReset(req.body.email)));
+export const resetPasswordPost = wrap(async (req, res) => res.json(await resetPassword(req.body.challenge, req.body.code, req.body.password)));
+
+export const activateAccountPost = wrap(async (req,res) => {const u=await activateAccount(req.body.token,req.body.password);try{await audit(u,"activar_cuenta")}catch(e){console.error("No se pudo registrar auditoría de activación:",e.name)}res.json({ok:true,message:"Cuenta activada. Ya puedes iniciar sesión."});});

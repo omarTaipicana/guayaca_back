@@ -1,7 +1,2 @@
-import sequelize from "../utils/connection.js";
-import { schema001 } from "../migrations/schema001.js";
-export default sequelize.define("User", schema001.users, {
-  tableName: "users",
-  timestamps: false,
-  freezeTableName: true,
-});
+import {DataTypes} from 'sequelize';import sequelize from '../utils/connection.js';import {schema001} from '../migrations/schema001.js';
+export default sequelize.define('User',{...schema001.users,last_name:{type:DataTypes.STRING(120),allowNull:true},document_number:{type:DataTypes.STRING(30),allowNull:true},birth_date:{type:DataTypes.DATEONLY,allowNull:true},sex:{type:DataTypes.STRING(40),allowNull:true},phone:{type:DataTypes.STRING(30),allowNull:true},photo_filename:{type:DataTypes.STRING(120),allowNull:true},photo_bytes:{type:DataTypes.BIGINT,allowNull:true},setup_pending:{type:DataTypes.BOOLEAN,allowNull:false,defaultValue:false}},{tableName:'users',timestamps:false,freezeTableName:true});

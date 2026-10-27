@@ -1,0 +1,17 @@
+import crypto from 'node:crypto';import bcrypt from 'bcryptjs';import {Op,literal} from 'sequelize';import {sequelize,User,Challenge} from '../models/index.js';import {sendMail,smtpConfigured} from './email.service.js';import {invitationEmail} from './emailTemplates.service.js';
+const kind='account_setup';
+function fail(message,status=400){let e=new Error(message);e.status=status;throw e}
+function digest(id,token){return crypto.createHmac('sha256',process.env.JWT_SECRET).update(id+':'+token).digest('hex')}
+export function validateInvitationConfig(){if(!smtpConfigured())fail('Configure el correo SMTP antes de crear usuarios.',503);let u;try{u=new URL(process.env.APP_URL)}catch{fail('Configure APP_URL con la dirección del front.',503)}if(u.username||u.password||u.search||u.hash||!(u.protocol==='https:'||(u.protocol==='http:'&&['localhost','127.0.0.1','::1'].includes(u.hostname))))fail('APP_URL debe ser HTTPS o localhost para pruebas.',503);return u}
+export async function sendInvitation(user){const base=validateInvitationConfig();if(!user.active||!user.setup_pending)fail('La cuenta no está pendiente de activación o está inactiva.');const id=crypto.randomUUID(),secret=crypto.randomBytes(32).toString('base64url');const url=new URL(base.href);url.hash=`/activar-cuenta?token=${id}.${secret}`;
+ await Challenge.destroy({where:{user_id:user.id,type:kind}});await Challenge.create({id,user_id:user.id,type:kind,code_hash:digest(id,secret),expires_at:new Date(Date.now()+48*60*60*1000)});
+ try{let mail=invitationEmail(url.href);await sendMail(user.email,mail.subject,mail.text,mail.html);return true}catch(e){await Challenge.destroy({where:{id}});console.error('No se pudo enviar la invitación:',e.code||e.name);return false}}
+export async function activateAccount(token,password){
+ if(typeof token!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/i.test(token))fail('El enlace es inválido o venció. Solicita uno nuevo al administrador.');
+ if(typeof password!=='string'||password.length<12||Buffer.byteLength(password,'utf8')>72)fail('La contraseña debe tener al menos 12 caracteres y no superar 72 bytes.');
+ const [id,secret]=token.split('.');const c=await Challenge.findOne({where:{id,type:kind,used_at:null,expires_at:{[Op.gt]:new Date()}}});if(!c)fail('El enlace es inválido o venció. Solicita uno nuevo al administrador.');
+ const expected=Buffer.from(c.code_hash,'hex'),got=Buffer.from(digest(id,secret),'hex');if(expected.length!==got.length||!crypto.timingSafeEqual(expected,got))fail('El enlace es inválido o venció. Solicita uno nuevo al administrador.');
+ const password_hash=await bcrypt.hash(password,12);
+ const user=await sequelize.transaction(async transaction=>{const tokenRecord=await Challenge.findOne({where:{id,type:kind,used_at:null,expires_at:{[Op.gt]:new Date()}},transaction,lock:transaction.LOCK.UPDATE});if(!tokenRecord)fail('El enlace es inválido o venció. Solicita uno nuevo al administrador.');const u=await User.findOne({where:{id:tokenRecord.user_id,active:true,setup_pending:true},transaction,lock:transaction.LOCK.UPDATE});if(!u)fail('El enlace es inválido o venció. Solicita uno nuevo al administrador.');await u.update({password_hash,email_verified:true,setup_pending:false,session_version:literal('session_version + 1')},{transaction});await Challenge.destroy({where:{user_id:u.id},transaction});return u});
+ return user;
+}

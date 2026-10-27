@@ -1,0 +1,2 @@
+import {Router} from 'express';import {auth,admin} from '../middlewares/verifyJWT.js';import {upload} from '../middlewares/upload.js';import {profileGet,profilePatch,profilePhotoGet,userPhotoGet} from '../controllers/profile.controllers.js';
+const router=Router();router.get('/api/profile',auth,profileGet);router.patch('/api/profile',auth,upload.single('photo'),profilePatch);router.get('/api/profile/photo',auth,profilePhotoGet);router.get('/api/users/:id/photo',auth,admin,userPhotoGet);export default router;
