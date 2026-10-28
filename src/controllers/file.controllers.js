@@ -1,3 +1,4 @@
+import Trip from '../models/Trip.js';
 import {
   Attachment,
   path,
@@ -12,7 +13,7 @@ export const downloadFile = wrap(async (req, res) => {
     where: { id: req.params.id, deleted_at: null },
   });
   if (!f) fail(404, "Archivo no disponible");
-  await tripAccess(req, f.trip_id);
+  if(req.user.role==='admin'){if(!await Trip.unscoped().findByPk(f.trip_id))fail(404,'Viaje no encontrado');}else await tripAccess(req, f.trip_id);
   await audit(req.user, "descargar_archivo", { file_id: f.id });
   res.type(f.mime);
   res.setHeader("Content-Disposition", "attachment");

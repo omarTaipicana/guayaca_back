@@ -1,74 +1,13 @@
-import {
-  os,
-  fs,
-  path,
-  Attachment,
-  uploadDir,
-  wrap,
-  fail,
-  audit,
-} from "../services/shared.service.js";
-export const storageGet = wrap(async (req, res) => {
-  let stat = await fs.statfs(uploadDir),
-    files = await Attachment.findAll({
-      where: { deleted_at: null },
-      attributes: [
-        "id",
-        "trip_id",
-        "category",
-        "original_name",
-        "bytes",
-        "created_at",
-      ],
-      order: [["created_at", "ASC"]],
-      limit: 500,
-    });
-  let bytes =
-      (await Attachment.sum("bytes", { where: { deleted_at: null } })) || 0,
-    count = await Attachment.count({ where: { deleted_at: null } });
-  res.json({
-    system: {
-      ramTotal: os.totalmem(),
-      ramFree: os.freemem(),
-      load: os.loadavg(),
-      uptime: os.uptime(),
-    },
-    total: Number(stat.blocks) * Number(stat.bsize),
-    free: Number(stat.bavail) * Number(stat.bsize),
-    used: (Number(stat.blocks) - Number(stat.bfree)) * Number(stat.bsize),
-    attachments: { bytes, count },
-    files,
-  });
-});
-export const storageDelete = wrap(async (req, res) => {
-  let ids = req.body.ids;
-  if (
-    req.body.confirm !== "ELIMINAR" ||
-    !Array.isArray(ids) ||
-    !ids.length ||
-    ids.length > 100 ||
-    ids.some((id) => !/^\d+$/.test(String(id)))
-  )
-    fail(400, "Seleccione hasta 100 archivos y escriba ELIMINAR");
-  let deleted = [],
-    errors = [];
-  for (const id of [...new Set(ids)]) {
-    let f = await Attachment.findOne({ where: { id, deleted_at: null } });
-    if (!f) {
-      errors.push({ id, error: "No disponible" });
-      continue;
-    }
-    try {
-      await fs.unlink(path.join(uploadDir, f.stored_name));
-      await f.update({ deleted_at: new Date() });
-      deleted.push(id);
-    } catch (e) {
-      errors.push({ id, error: "No se pudo eliminar" });
-    }
-  }
-  await audit(req.user, "eliminar_archivos", {
-    ids: deleted,
-    errors: errors.length,
-  });
-  res.json({ deleted, errors });
-});
+import crypto from 'node:crypto';import {Op,literal,QueryTypes} from 'sequelize';import {os,fs,path,Attachment,uploadDir,wrap,fail,audit,sequelize,secret,User,Vehicle} from '../services/shared.service.js';import Challenge from '../models/Challenge.js';import {sendMail} from '../services/email.service.js';import {securityEmail} from '../services/emailTemplates.service.js';
+const protection=`(t.deleted_at IS NULL AND t.status IN ('creado','en_curso') AND (f.category IN ('guia','entrega') OR EXISTS (SELECT 1 FROM trip_stops s WHERE (s.arrival_file_id=f.id OR s.departure_file_id=f.id) AND t.deleted_at IS NULL AND t.status IN ('creado','en_curso'))))`;
+function filters(q){const terms=['f.deleted_at IS NULL'],r={};if(q.q){r.q='%'+String(q.q).trim().slice(0,180)+'%';terms.push('(f.original_name ILIKE :q OR t.code ILIKE :q)')}if(q.category){if(!['guia','entrega','combustible','peaje','otro'].includes(q.category))fail(400,'Categoría inválida');terms.push('f.category = :category');r.category=q.category}if(q.trip_id){if(!/^[1-9][0-9]*$/.test(q.trip_id))fail(400,'Viaje inválido');terms.push('f.trip_id = :trip_id');r.trip_id=q.trip_id}for(const [key,op] of [['from','>='],['to','<']])if(q[key]){const value=String(q[key]),d=new Date(value+'T00:00:00-05:00');if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(+d)||new Date(value+'T00:00:00Z').toISOString().slice(0,10)!==value)fail(400,'Fecha inválida');r[key]=new Date(+d+(key==='to'?86400000:0));terms.push('f.created_at '+op+' :'+key)}if(r.from&&r.to&&r.from>=r.to)fail(400,'Período inválido');if(q.older_days){const n=Number(q.older_days);if(!Number.isInteger(n)||n<1||n>36500)fail(400,'Antigüedad inválida');r.older=new Date(Date.now()-n*86400000);terms.push('f.created_at < :older')}return {where:terms.join(' AND '),r};}
+const ordering={oldest:'f.created_at ASC,f.id ASC',newest:'f.created_at DESC,f.id DESC',largest:'f.bytes DESC,f.id ASC',smallest:'f.bytes ASC,f.id ASC',trip:'f.trip_id ASC,f.created_at ASC,f.id ASC',category:'f.category ASC,f.created_at ASC,f.id ASC'};
+async function rows(q,selection=false){const {where,r}=filters(q),page=Number(q.page||1),limit=Number(q.limit||25);if(!Number.isInteger(page)||page<1||page>100000||!Number.isInteger(limit)||limit<1||limit>100)fail(400,'Paginación inválida');const sort=ordering[q.sort||'oldest'];if(!sort)fail(400,'Orden inválido');const clause=where+(selection?' AND NOT '+protection:'');const [totals]=await sequelize.query(`SELECT COUNT(*)::int AS count,COALESCE(SUM(f.bytes),0) AS bytes FROM files f LEFT JOIN trips t ON t.id=f.trip_id WHERE ${clause}`,{replacements:r,type:QueryTypes.SELECT});if(selection&&totals.count>500)fail(400,'Hay más de 500 archivos eliminables. Reduce los filtros para seleccionar todos.');const items=await sequelize.query(`SELECT f.id,f.trip_id,f.category,f.original_name,f.bytes,f.created_at,t.code AS trip_code,t.deleted_at AS trip_deleted_at,${protection} AS protected FROM files f LEFT JOIN trips t ON t.id=f.trip_id WHERE ${clause} ORDER BY ${sort} LIMIT :limit OFFSET :offset`,{replacements:{...r,limit:selection?500:limit,offset:selection?0:(page-1)*limit},type:QueryTypes.SELECT});return {items,total:totals.count,bytes:Number(totals.bytes),page,pages:Math.max(1,Math.ceil(totals.count/limit))};}
+export const storageFiles=wrap(async(req,res)=>res.json(await rows(req.query)));
+export const storageSelection=wrap(async(req,res)=>res.json(await rows(req.query,true)));
+export const storageGet=wrap(async(req,res)=>{const stat=await fs.statfs(uploadDir),total=Number(stat.blocks)*Number(stat.bsize),free=Number(stat.bavail)*Number(stat.bsize),used=(Number(stat.blocks)-Number(stat.bfree))*Number(stat.bsize);const categories=await sequelize.query("SELECT category,COUNT(*)::int AS count,COALESCE(SUM(bytes),0) AS bytes FROM files WHERE deleted_at IS NULL GROUP BY category ORDER BY SUM(bytes) DESC",{type:QueryTypes.SELECT});const months=await sequelize.query("SELECT to_char(created_at AT TIME ZONE 'America/Guayaquil','YYYY-MM') AS month,COUNT(*)::int AS count,COALESCE(SUM(bytes),0) AS bytes FROM files WHERE deleted_at IS NULL GROUP BY 1 ORDER BY 1 DESC LIMIT 12",{type:QueryTypes.SELECT});const photos={users:Number(await User.sum('photo_bytes')||0),vehicles:Number(await Vehicle.sum('photo_bytes')||0)};res.json({generated_at:new Date(),system:{ramTotal:os.totalmem(),ramFree:os.freemem(),load:os.loadavg(),uptime:os.uptime(),cpuCount:os.cpus().length},total,free,used,reserved:Math.max(0,total-used-free),attachments:{bytes:categories.reduce((n,x)=>n+Number(x.bytes),0),count:categories.reduce((n,x)=>n+x.count,0)},categories,months,photos});});
+function idsBody(body){const ids=body?.ids;if(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>!/^[1-9][0-9]*$/.test(String(id))))fail(400,'Selecciona de 1 a 500 archivos');return [...new Set(ids.map(String))].sort();}
+const typeFor=ids=>'storage_delete:'+crypto.createHash('sha256').update(ids.join(',')).digest('hex');const hash=(id,code)=>crypto.createHmac('sha256',secret).update(id+':'+code).digest('hex');
+async function eligible(ids,transaction){return sequelize.query(`SELECT f.id,${protection} AS protected FROM files f LEFT JOIN trips t ON t.id=f.trip_id WHERE f.id IN (:ids) AND f.deleted_at IS NULL`,{replacements:{ids},type:QueryTypes.SELECT,transaction});}
+export const storageCode=wrap(async(req,res)=>{const ids=idsBody(req.body),files=await eligible(ids);if(files.length!==ids.length||files.some(f=>f.protected))fail(409,'La selección cambió o incluye guías de viajes activos. Actualiza la lista.');const type=typeFor(ids),id=crypto.randomUUID(),code=String(crypto.randomInt(100000,1000000));await Challenge.destroy({where:{user_id:req.user.id,type}});await Challenge.create({id,type,user_id:req.user.id,code_hash:hash(id,code),expires_at:new Date(Date.now()+600000)});try{const mail=securityEmail('record_delete',code);await sendMail(req.user.email,mail.subject,mail.text+'\nLimpieza de '+ids.length+' archivos seleccionados.',mail.html)}catch{await Challenge.destroy({where:{id}});fail(503,'No se pudo enviar el código. Revisa SMTP.')}res.json({challenge:id,count:ids.length});});
+export const storageDelete=wrap(async(req,res)=>{const ids=idsBody(req.body),{challenge,code,confirm}=req.body;if(confirm!=='ELIMINAR'||!/^[0-9a-f-]{36}$/i.test(challenge||'')||!/^\d{6}$/.test(code||''))fail(400,'Escribe ELIMINAR e ingresa el código enviado a tu correo');const type=typeFor(ids),[n,checks]=await Challenge.update({attempts:literal('attempts+1')},{where:{id:challenge,user_id:req.user.id,type,used_at:null,expires_at:{[Op.gt]:new Date()},attempts:{[Op.lt]:5}},returning:true});if(!n)fail(400,'Código vencido, usado o selección distinta. Solicita otro.');const a=Buffer.from(checks[0].code_hash),b=Buffer.from(hash(challenge,code));if(a.length!==b.length||!crypto.timingSafeEqual(a,b))fail(400,'Código incorrecto');const [consumed]=await Challenge.update({used_at:new Date()},{where:{id:challenge,used_at:null}});if(!consumed)fail(400,'Código ya utilizado');const deleted=[],errors=[];let freed=0;for(const id of ids){try{const count=await sequelize.transaction(async transaction=>{const f=await Attachment.findOne({where:{id,deleted_at:null},transaction,lock:transaction.LOCK.UPDATE});if(!f)throw Error('No disponible');const allowed=await eligible([id],transaction);if(!allowed.length||allowed[0].protected)throw Error('Guía protegida de viaje activo');try{await fs.unlink(path.join(uploadDir,path.basename(f.stored_name)))}catch(e){if(e.code!=='ENOENT')throw e}await f.update({deleted_at:new Date()},{transaction});return Number(f.bytes)});deleted.push(id);freed+=count}catch(e){errors.push({id,error:e.message==='No disponible'||e.message==='Guía protegida de viaje activo'?e.message:'No se pudo eliminar; reintenta con una nueva autorización'})}}await audit(req.user,'eliminar_archivos',{ids:deleted,errors:errors.length,bytes:freed,two_factor:true});res.json({deleted,errors,bytes:freed});});

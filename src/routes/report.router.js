@@ -1,0 +1,1 @@
+import {Router} from 'express';import {auth,allow} from '../middlewares/verifyJWT.js';import {reportGet,reportOptions} from '../controllers/report.controllers.js';const router=Router();router.get('/api/reports/options',auth,allow('reportes'),reportOptions);router.get('/api/reports/summary',auth,allow('reportes'),reportGet);export default router;

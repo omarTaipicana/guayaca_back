@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {gpsFields} from '../migrations/009-gps-stops.js';export default db.define('GpsSample',gpsFields,{tableName:'gps_samples',timestamps:false,freezeTableName:true});

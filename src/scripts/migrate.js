@@ -1,3 +1,9 @@
+import * as gpsStops from '../migrations/009-gps-stops.js';
+import * as tripQuotes from '../migrations/008-trip-quotes.js';
+import * as maintenanceAlerts from '../migrations/007-maintenance-alerts.js';
+import * as maintenanceHistory from '../migrations/006-maintenance-history.js';
+import * as clientsPlaces from '../migrations/005-clients-places.js';
+import * as zoneRates from '../migrations/004-zone-rates.js';
 import "dotenv/config";
 import { Umzug, SequelizeStorage } from "umzug";
 import sequelize from "../utils/connection.js";
@@ -5,7 +11,7 @@ import * as initial from "../migrations/001-initial.js";
 import * as vehicleDetails from "../migrations/002-vehicle-details.js";
 import * as userProfile from "../migrations/003-user-profile.js";
 const migrator = new Umzug({
-  migrations: [initial, vehicleDetails, userProfile],
+  migrations: [initial, vehicleDetails, userProfile, zoneRates, clientsPlaces, maintenanceHistory, maintenanceAlerts, tripQuotes, gpsStops],
   context: sequelize,
   storage: new SequelizeStorage({ sequelize, tableName: "guayaca_migrations" }),
   logger: console,

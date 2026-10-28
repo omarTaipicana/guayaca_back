@@ -1,0 +1,11 @@
+import rateLimit from 'express-rate-limit';
+import {Router} from 'express';
+import {auth,admin} from '../middlewares/verifyJWT.js';
+import {territories,territory,categories,saveCategory,rates,saveRate,deleteCategory,requestCategoryDelete} from '../controllers/zone.controllers.js';
+const router=Router();router.use('/api/zones',auth,admin);
+router.get('/api/zones/territories',territories);router.get('/api/zones/territories/:id',territory);
+router.get('/api/zones/categories',categories);router.post('/api/zones/categories',saveCategory);router.patch('/api/zones/categories/:id',saveCategory);
+const deleteLimit=rateLimit({windowMs:15*60*1000,limit:5,keyGenerator:req=>String(req.user.id),standardHeaders:true,legacyHeaders:false,message:{error:'Demasiadas solicitudes. Espera 15 minutos para solicitar otro código.'}});
+router.post('/api/zones/categories/:id/delete-code',deleteLimit,requestCategoryDelete);
+router.delete('/api/zones/categories/:id',deleteCategory);
+router.get('/api/zones/rates',rates);router.post('/api/zones/rates',saveRate);export default router;

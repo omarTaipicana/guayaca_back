@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {quoteFields} from '../migrations/008-trip-quotes.js';export default db.define('TripQuote',quoteFields,{tableName:'trip_quotes',timestamps:false,freezeTableName:true});

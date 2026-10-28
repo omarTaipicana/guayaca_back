@@ -17,12 +17,12 @@ async function main() {
     { name: { type: DataTypes.STRING, primaryKey: true } },
     { tableName: "guayaca_migrations", timestamps: false },
   );
-  if (!(await Migration.findByPk("003-user-profile")))
+  if (!(await Migration.findByPk("009-gps-stops")))
     throw Error("Faltan migraciones. Ejecute npm run db:migrate.");
   const { default: app } = await import("./app.js");
   const PORT = Number(process.env.PORT || 8088);
   app.listen(PORT, process.env.HOST || "127.0.0.1", () =>
-    console.log(`GUAYACA API v0.2.4 puerto ${PORT}`),
+    console.log(`GUAYACA API v0.3.2 puerto ${PORT}`),
   );
 }
 main().catch((e) => {

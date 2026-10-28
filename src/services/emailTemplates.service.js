@@ -12,6 +12,9 @@ function logoUrl(){
  } catch { return null; }
 }
 const variants={
+ maintenance_edit:{subject:'GUAYACA · Autoriza corrección de mantenimiento',title:'Autoriza la edición del mantenimiento',intro:'Usa este código para guardar la corrección de un mantenimiento finalizado. El registro seguirá finalizado y los cambios quedarán en el historial de auditoría.',purpose:'AUTORIZACIÓN DE EDICIÓN'},
+ record_delete:{subject:'GUAYACA · Confirma la eliminación',title:'Autoriza la eliminación del registro',intro:'Usa este código para confirmar la eliminación que solicitaste en GUAYACA. Solo sirve para ese registro y tu cuenta de administrador.',purpose:'CONFIRMACIÓN DE ELIMINACIÓN'},
+ category_delete:{subject:'GUAYACA · Confirma la eliminación de categoría',title:'Autoriza la eliminación de categoría',intro:'Usa este código para eliminar la categoría que seleccionaste en GUAYACA. Solo funciona para esa categoría y desde tu cuenta de administrador.',purpose:'CONFIRMACIÓN DE ELIMINACIÓN'},
  verify:{subject:'GUAYACA · Verifica tu correo',title:'Verifica tu correo',intro:'Usa este código para confirmar tu dirección de correo en GUAYACA Transport.',purpose:'VERIFICACIÓN DE CORREO'},
  login:{subject:'GUAYACA · Código de doble factor',title:'Confirma tu inicio de sesión',intro:'Usa este código para completar tu ingreso a GUAYACA Transport.',purpose:'DOBLE FACTOR'},
  password_reset:{subject:'GUAYACA · Recupera tu contraseña',title:'Recupera tu contraseña',intro:'Recibimos una solicitud para restablecer tu contraseña. Ingresa este código en la pantalla de recuperación.',purpose:'RECUPERACIÓN DE CONTRASEÑA'},

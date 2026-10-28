@@ -1,11 +1,1 @@
-import { Router } from "express";
-import { auth, allow, admin } from "../middlewares/verifyJWT.js";
-import { upload } from "../middlewares/upload.js";
-import {
-  storageGet,
-  storageDelete,
-} from "../controllers/storage.controllers.js";
-const router = Router();
-router.get("/api/storage", auth, admin, storageGet);
-router.post("/api/storage/delete", auth, admin, storageDelete);
-export default router;
+import {Router} from 'express';import rateLimit from 'express-rate-limit';import {auth,admin} from '../middlewares/verifyJWT.js';import {storageGet,storageFiles,storageSelection,storageCode,storageDelete} from '../controllers/storage.controllers.js';const router=Router(),limit=rateLimit({windowMs:900000,limit:5,keyGenerator:req=>String(req.user.id),standardHeaders:true,legacyHeaders:false,message:{error:'Espera 15 minutos antes de solicitar más códigos.'}});router.get('/api/storage',auth,admin,storageGet);router.get('/api/storage/files',auth,admin,storageFiles);router.get('/api/storage/files/selection',auth,admin,storageSelection);router.post('/api/storage/delete-code',auth,admin,limit,storageCode);router.post('/api/storage/delete',auth,admin,storageDelete);export default router;

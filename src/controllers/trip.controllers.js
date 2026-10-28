@@ -1,3 +1,8 @@
+import {storeDocument,removeDocument} from '../services/document.service.js';
+import {Op} from 'sequelize';import Audit from '../models/Audit.js';
+import Quote from '../models/TripQuote.js';import Delivery from '../models/TripDelivery.js';import Client from '../models/Client.js';import Place from '../models/Place.js';import Category from '../models/TonnageCategory.js';import Rate from '../models/ZoneRate.js';
+import {recordMileage,dispatchAlerts,km} from '../services/maintenanceAlert.service.js';
+import Maintenance from '../models/Maintenance.js';
 import {
   sequelize,
   User,
@@ -44,39 +49,7 @@ export const tripsGet = wrap(async (req, res) => {
     }),
   );
 });
-export const tripsPost = wrap(async (req, res) => {
-  let {
-    driver_id,
-    vehicle_id,
-    client = "",
-    origin = "",
-    destination = "",
-    amount = 0,
-  } = req.body;
-  if (
-    !driver_id ||
-    !vehicle_id ||
-    !Number.isFinite(Number(amount)) ||
-    Number(amount) < 0
-  )
-    fail(400, "Datos de viaje inválidos");
-  let u = await User.findOne({ where: { id: driver_id, active: true } }),
-    v = await Vehicle.findOne({ where: { id: vehicle_id, active: true } });
-  if (!u || !v) fail(400, "Conductor o vehículo inválido");
-  let t = await sequelize.transaction(async (transaction) => {
-    let x = await Trip.create(
-      { driver_id, vehicle_id, client, origin, destination, amount },
-      { transaction },
-    );
-    await x.update(
-      { code: "V-" + String(x.id).padStart(5, "0") },
-      { transaction },
-    );
-    return x;
-  });
-  await audit(req.user, "crear_viaje", { trip_id: t.id });
-  res.json(t);
-});
+export const tripsPost=wrap(async(req,res)=>{const id=req.body?.quote_id;if(!/^[0-9a-f-]{36}$/i.test(id||''))fail(400,'Primero calcula la ruta y el valor del viaje');const trip=await sequelize.transaction(async transaction=>{const q=await Quote.findOne({where:{id,user_id:req.user.id},transaction,lock:transaction.LOCK.UPDATE});if(!q||q.used_at||new Date(q.expires_at)<=new Date())fail(400,'El cálculo venció o ya se utilizó. Vuelve a calcular.');const {driver_id,vehicle_id,tonnage,metadata}=q.payload;if(req.user.role!=='admin'&&String(driver_id)!==String(req.user.id))fail(403,'Conductor no autorizado');const driver=await User.findOne({where:{id:driver_id,active:true,setup_pending:false,role:'conductor'},transaction});if(!driver||!driver.permissions.includes('viajes'))fail(400,'Conductor no habilitado');const v=await Vehicle.findByPk(vehicle_id,{transaction,lock:transaction.LOCK.UPDATE});if(!v?.active||(v.capacity_tons!=null&&tonnage>Number(v.capacity_tons))||await Maintenance.count({where:{vehicle_id,closed_at:null},transaction})||await Trip.count({where:{vehicle_id,status:{[Op.in]:['creado','en_curso']}},transaction}))fail(409,'El vehículo ya no está disponible');if(!await Client.findOne({where:{id:metadata.client.id,active:true},transaction}))fail(409,'El cliente ya no está habilitado');for(const [index,point] of [metadata.origin_place,...metadata.destination_places].entries()){const current=await Place.findOne({where:{id:point.id,active:true},transaction});if(!current||Number(current.latitude)!==Number(point.latitude)||Number(current.longitude)!==Number(point.longitude)||current.type!==point.type)fail(409,'Un lugar cambió o dejó de estar habilitado. Recalcula el viaje.');}const rate=await Rate.findOne({where:{id:metadata.applied_rate.id,active:true},transaction});const category=await Category.findOne({where:{id:metadata.category.id,active:true},transaction});if(!rate||Number(rate.amount)!==Number(metadata.amount)||!category||tonnage<Number(category.min_tons)||(category.max_tons!=null&&tonnage>=Number(category.max_tons)))fail(409,'La tarifa o categoría cambió. Vuelve a calcular.');let x=await Trip.create({driver_id,vehicle_id,tonnage,client:metadata.client.name,origin:metadata.origin_place.name,destination:metadata.destination_places.map(p=>p.name).join(' → '),amount:metadata.amount,metadata},{transaction});await x.update({code:'V-'+String(x.id).padStart(5,'0')},{transaction});await q.update({used_at:new Date()},{transaction});await Audit.create({user_id:req.user.id,action:'crear_viaje',details:{trip_id:x.id,amount:x.amount,calculation:metadata.calculation}},{transaction});return x;});res.status(201).json(trip);});
 export const tripGet = wrap(async (req, res) => {
   let t = await tripAccess(req, req.params.id);
   let events = await TripEvent.findAll({
@@ -103,10 +76,11 @@ export const tripGet = wrap(async (req, res) => {
     ],
     order: [["id", "ASC"]],
   });
-  res.json({ trip: t, events, expenses, files });
+  const deliveries=await Delivery.findAll({where:{trip_id:t.id},order:[['position','ASC']]});
+  res.json({ trip: t, events, expenses, files,deliveries });
 });
 export const eventPost = wrap(async (req, res) => {
-  await tripAccess(req, req.params.id);
+  const eventTrip=await tripAccess(req, req.params.id);if(eventTrip.metadata?.route)fail(409,'Las llegadas y salidas de este viaje se registran por GPS. Completa sus pendientes de kilometraje y guía.');
   let { type, odometer, latitude, longitude, accuracy, notes = "" } = req.body;
   const types = [
     "salida_domicilio",
@@ -151,6 +125,8 @@ export const eventPost = wrap(async (req, res) => {
     });
     if (last && Number(odometer) < Number(last.odometer))
       fail(400, "El kilometraje no puede ser menor al anterior");
+    const stops=t.metadata?.calculation==='farthest_road_destination'?t.metadata.destination_places:[];
+    let destination_index=null;if(stops.length&&['llegada_destino','entrega'].includes(type)){destination_index=Number(req.body.destination_index);if(req.body.destination_index==null||req.body.destination_index===''||!Number.isInteger(destination_index)||destination_index<0||destination_index>=stops.length)fail(400,'Selecciona un destino de entrega');if(type==='entrega'&&await Delivery.count({where:{trip_id:t.id,position:destination_index},transaction}))fail(400,'Ese destino ya fue entregado');}
     let e = await TripEvent.create(
       {
         trip_id: t.id,
@@ -159,6 +135,7 @@ export const eventPost = wrap(async (req, res) => {
         latitude: has ? latitude : null,
         longitude: has ? longitude : null,
         accuracy: has && Number.isFinite(Number(accuracy)) ? accuracy : null,
+        destination_index,
         location_status: has ? "disponible" : "no_disponible",
         notes: String(notes),
       },
@@ -169,11 +146,13 @@ export const eventPost = wrap(async (req, res) => {
         { status: "en_curso", started_at: new Date() },
         { transaction },
       );
-    if (type === "entrega")
+    if(type==='entrega'&&stops.length)await Delivery.create({trip_id:t.id,position:destination_index,event_id:e.id},{transaction});
+    if (type === "entrega"&&(!stops.length||await Delivery.count({where:{trip_id:t.id},transaction})===stops.length))
       await t.update(
         { status: "finalizado", closed_at: new Date() },
         { transaction },
       );
+    await recordMileage(t.vehicle_id,odometer,null,transaction);
     return e;
   });
   await audit(req.user, "registrar_evento", {
@@ -181,36 +160,17 @@ export const eventPost = wrap(async (req, res) => {
     event_id: event.id,
     type,
   });
+  await dispatchAlerts(eventTrip.vehicle_id);
   res.json(event);
 });
-export const expensePost = wrap(async (req, res) => {
-  let t = await tripAccess(req, req.params.id);
-  let { type, amount, notes = "" } = req.body;
-  if (
-    !["combustible", "peaje"].includes(type) ||
-    amount === "" ||
-    amount == null ||
-    !Number.isFinite(Number(amount)) ||
-    Number(amount) < 0
-  )
-    fail(400, "Gasto inválido");
-  let e = await Expense.create({ trip_id: t.id, type, amount, notes });
-  await audit(req.user, "registrar_gasto", { trip_id: t.id, expense_id: e.id });
-  res.json(e);
-});
+export const expensePost=wrap(async(req,res)=>{const t=await tripAccess(req,req.params.id);const {type,amount,notes=''}=req.body;if(!['combustible','peaje'].includes(type)||amount===''||amount==null||!Number.isFinite(+amount)||+amount<0)fail(400,'Gasto inválido');const odometer=type==='combustible'?km(req.body.odometer):null;let document;try{document=await storeDocument(req.file,true);const result=await sequelize.transaction(async transaction=>{const expense=await Expense.create({trip_id:t.id,type,amount,notes,odometer},{transaction});const file=await Attachment.create({...document,trip_id:t.id,expense_id:expense.id,category:type},{transaction});if(odometer!==null)await recordMileage(t.vehicle_id,odometer,null,transaction);await Audit.create({user_id:req.user.id,action:'registrar_gasto',details:{trip_id:t.id,expense_id:expense.id,file_id:file.id}},{transaction});return {...expense.toJSON(),file_id:file.id};});if(odometer!==null)await dispatchAlerts(t.vehicle_id);res.json(result);}catch(e){if(document)await removeDocument(document);throw e;}});
 export const filePost = wrap(async (req, res) => {
   let t = await tripAccess(req, req.params.id),
     f = req.file;
   if (!f) fail(400, "Seleccione archivo");
-  let category = req.body.category;
-  if (!["guia", "entrega", "combustible", "peaje", "otro"].includes(category))
-    fail(400, "Categoría inválida");
-  let id = req.body.event_id || null,
-    eid = req.body.expense_id || null;
-  if (id && !(await TripEvent.findOne({ where: { id, trip_id: t.id } })))
-    fail(400, "Evento inválido");
-  if (eid && !(await Expense.findOne({ where: { id: eid, trip_id: t.id } })))
-    fail(400, "Gasto inválido");
+  const category=req.body.category||'guia';
+  if(category!=='guia'||req.body.expense_id||req.body.event_id)fail(400,'Esta sección solo permite adjuntar guías. Sube los recibos desde el gasto y los documentos de cada punto desde sus pendientes.');
+  const id=null,eid=null;
   let buffer = f.buffer,
     mime,
     ext;
