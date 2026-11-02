@@ -1,0 +1,3 @@
+import db from '../utils/connection.js';import Mode from '../models/TripMode.js';import Audit from '../models/Audit.js';import {wrap,fail} from '../services/catalog.service.js';
+export const getMode=wrap(async(req,res)=>res.json(await Mode.findByPk(1)));
+export const setMode=wrap(async(req,res)=>{if(typeof req.body.is_test!=='boolean'||req.body.confirm!==true)fail('Confirma el modo de creación');const mode=await db.transaction(async transaction=>{const row=await Mode.findByPk(1,{transaction,lock:transaction.LOCK.UPDATE});await row.update({is_test:req.body.is_test,version:row.version+1},{transaction});await Audit.create({user_id:req.user.id,action:'viajes.modo_cambiado',details:{is_test:row.is_test,version:row.version}},{transaction});return row});res.json(mode)});

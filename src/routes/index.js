@@ -1,3 +1,4 @@
+import bulkDeletion from './bulkDeletion.router.js';
 import collections from './collection.router.js';
 import maintenancePlans from './maintenancePlan.router.js';
 import reports from './report.router.js';
@@ -20,6 +21,7 @@ import control from "./control.router.js";
 import profile from "./profile.router.js";
 const router = Router();
 router.use(maintenancePlans);
+router.use(bulkDeletion);
 router.use(collections);
 router.use(reports);
 router.use(gps);

@@ -1,3 +1,5 @@
+import {simulate} from '../controllers/simulation.controllers.js';
+import {getMode,setMode} from '../controllers/tripMode.controllers.js';
 import rateLimit from 'express-rate-limit';
 import {tripOptions,quoteTrip} from '../controllers/tripQuote.controllers.js';
 import { Router } from "express";
@@ -11,7 +13,7 @@ import {
   expensePost,
   filePost,
 } from "../controllers/trip.controllers.js";
-const router = Router();
+const router = Router();router.get('/api/trip-mode',auth,getMode);router.put('/api/trip-mode',auth,admin,setMode);
 router.get(
   "/api/trips",
   auth,
@@ -37,4 +39,4 @@ router.post(
   upload.single("file"),
   filePost,
 );
-export default router;
+router.post('/api/trips/:id/simulate',auth,admin,simulate);export default router;

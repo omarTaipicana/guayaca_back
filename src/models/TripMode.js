@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {modeFields} from '../migrations/014-test-trips-report-edit.js';export default db.define('TripMode',modeFields,{tableName:'trip_mode',timestamps:false});

@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {revisionFields} from '../migrations/014-test-trips-report-edit.js';export default db.define('CollectionRevision',revisionFields,{tableName:'collection_revisions',timestamps:false});
