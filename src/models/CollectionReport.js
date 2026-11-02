@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {collectionFields} from '../migrations/012-standby-collections.js';export default db.define('CollectionReport',collectionFields,{tableName:'collection_reports',timestamps:false});

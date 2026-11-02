@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {lineFields} from '../migrations/012-standby-collections.js';export default db.define('CollectionLine',lineFields,{tableName:'collection_lines',timestamps:false});

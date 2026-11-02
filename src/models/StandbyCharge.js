@@ -1,0 +1,1 @@
+import db from '../utils/connection.js';import {standbyFields} from '../migrations/012-standby-collections.js';export default db.define('StandbyCharge',standbyFields,{tableName:'standby_charges',timestamps:false});

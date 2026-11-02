@@ -1,1 +1,2 @@
-import db from '../utils/connection.js';import {operationalFields} from '../migrations/009-gps-stops.js';export default db.define('OperationalNotification',operationalFields,{tableName:'operational_notifications',timestamps:false,freezeTableName:true});
+import {DataTypes} from 'sequelize';
+import db from '../utils/connection.js';import {operationalFields} from '../migrations/009-gps-stops.js';export default db.define('OperationalNotification',{...operationalFields,deleted_at:DataTypes.DATE},{tableName:'operational_notifications',timestamps:false,freezeTableName:true});

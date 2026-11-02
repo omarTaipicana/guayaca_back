@@ -1,1 +1,2 @@
-import db from '../utils/connection.js';import {notificationFields} from '../migrations/007-maintenance-alerts.js';export default db.define('Notification',notificationFields,{tableName:'notifications',timestamps:false,freezeTableName:true});
+import {DataTypes} from 'sequelize';
+import db from '../utils/connection.js';import {notificationFields} from '../migrations/007-maintenance-alerts.js';export default db.define('Notification',{...notificationFields,deleted_at:DataTypes.DATE},{tableName:'notifications',timestamps:false,freezeTableName:true});

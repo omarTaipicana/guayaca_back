@@ -1,3 +1,6 @@
+import * as initialOdometer from '../migrations/013-initial-odometer.js';
+import * as standbyCollections from '../migrations/012-standby-collections.js';
+import * as notificationDeletion from '../migrations/011-notification-deletion.js';
 import * as maintenancePlans from '../migrations/010-maintenance-plans.js';
 import * as gpsStops from '../migrations/009-gps-stops.js';
 import * as tripQuotes from '../migrations/008-trip-quotes.js';
@@ -12,7 +15,7 @@ import * as initial from "../migrations/001-initial.js";
 import * as vehicleDetails from "../migrations/002-vehicle-details.js";
 import * as userProfile from "../migrations/003-user-profile.js";
 const migrator = new Umzug({
-  migrations: [initial, vehicleDetails, userProfile, zoneRates, clientsPlaces, maintenanceHistory, maintenanceAlerts, tripQuotes, gpsStops, maintenancePlans],
+  migrations: [initial, vehicleDetails, userProfile, zoneRates, clientsPlaces, maintenanceHistory, maintenanceAlerts, tripQuotes, gpsStops, maintenancePlans, notificationDeletion, standbyCollections, initialOdometer],
   context: sequelize,
   storage: new SequelizeStorage({ sequelize, tableName: "guayaca_migrations" }),
   logger: console,
