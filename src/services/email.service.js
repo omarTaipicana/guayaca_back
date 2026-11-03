@@ -17,11 +17,12 @@ export function createMailTransport() {
     throw error;
   }
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
+    host: process.env.SMTP_HOST.trim(),
     port,
-    secure: process.env.SMTP_SECURE === 'true',
-    requireTLS: process.env.SMTP_SECURE !== 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    secure: port === 465 || process.env.SMTP_SECURE === 'true',
+    requireTLS: !(port === 465 || process.env.SMTP_SECURE === 'true'),
+    socketTimeout: 30000,
+    auth: { user: process.env.SMTP_USER.trim(), pass: process.env.SMTP_HOST.trim().toLowerCase()==='smtp.gmail.com' ? process.env.SMTP_PASS.replace(/\s/g,'') : process.env.SMTP_PASS },
     connectionTimeout: 15000,
     greetingTimeout: 15000,
   });

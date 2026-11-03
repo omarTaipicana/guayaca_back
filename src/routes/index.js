@@ -1,3 +1,5 @@
+import offline from './offline.router.js';
+import tripControl from './tripControl.router.js';
 import bulkDeletion from './bulkDeletion.router.js';
 import collections from './collection.router.js';
 import maintenancePlans from './maintenancePlan.router.js';
@@ -20,6 +22,8 @@ import storage from "./storage.router.js";
 import control from "./control.router.js";
 import profile from "./profile.router.js";
 const router = Router();
+router.use(offline);
+router.use(tripControl);
 router.use(maintenancePlans);
 router.use(bulkDeletion);
 router.use(collections);

@@ -9,7 +9,8 @@ app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (origin && origin === process.env.APP_URL) {
+  const origins=[process.env.APP_URL,...(process.env.CORS_ORIGINS||'').split(',')].map(x=>x?.trim()).filter(Boolean);
+  if (origin && origins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
     res.setHeader(
@@ -41,6 +42,8 @@ app.use((err, req, res, next) => {
     err.original?.code === "23503"
   )
     return res.status(400).json({ error: "Referencia inválida" });
+  if(['LIMIT_FILE_COUNT','LIMIT_UNEXPECTED_FILE'].includes(err.code))return res.status(400).json({error:'Demasiados adjuntos o campo no permitido. Una guía admite hasta 10 archivos; los demás registros admiten uno.'});
+  if(err.code==='LIMIT_FIELD_VALUE')return res.status(400).json({error:'Los datos del formulario exceden el límite permitido'});
   if (err.code === "LIMIT_FILE_SIZE")
     return res.status(400).json({ error: "Archivo supera 12 MB" });
   res.status(err.status || 500).json({

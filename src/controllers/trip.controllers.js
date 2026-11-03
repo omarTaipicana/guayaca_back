@@ -1,3 +1,7 @@
+import {operationTransaction} from '../services/operationTransaction.service.js';
+import Stop from '../models/TripStop.js';
+import {tripProgress} from '../services/tripStop.service.js';
+import {optimizeImage} from '../services/image.service.js';
 import Mode from '../models/TripMode.js';
 import {storeDocument,removeDocument} from '../services/document.service.js';
 import {Op} from 'sequelize';import Audit from '../models/Audit.js';
@@ -34,6 +38,7 @@ export const tripsGet = wrap(async (req, res) => {
     order: [["id", "DESC"]],
     limit: 300,
   });
+  const stops=trips.length?await Stop.findAll({where:{trip_id:{[Op.in]:trips.map(t=>t.id)}}}):[];
   res.json(
     trips.map((t) => {
       let x = t.get({ plain: true });
@@ -42,7 +47,7 @@ export const tripsGet = wrap(async (req, res) => {
       delete x.vehicle;
       delete x.expenses;
       return {
-        ...x,
+        ...x,operation_status:tripProgress(t,stops.filter(s=>String(s.trip_id)===String(t.id))),
         driver: [t.driverUser?.name, t.driverUser?.last_name].filter(Boolean).join(" "),
         plate: t.vehicle?.plate,
         expenses: sum.toFixed(2),
@@ -164,7 +169,7 @@ export const eventPost = wrap(async (req, res) => {
   if(!eventTrip.is_test)await dispatchAlerts(eventTrip.vehicle_id);
   res.json(event);
 });
-export const expensePost=wrap(async(req,res)=>{const t=await tripAccess(req,req.params.id);const {type,amount,notes=''}=req.body;if(!['combustible','peaje'].includes(type)||amount===''||amount==null||!Number.isFinite(+amount)||+amount<0)fail(400,'Gasto inválido');const odometer=type==='combustible'?km(req.body.odometer):null;let document;try{document=await storeDocument(req.file,true);const result=await sequelize.transaction(async transaction=>{const expense=await Expense.create({trip_id:t.id,type,amount,notes,odometer},{transaction});const file=await Attachment.create({...document,trip_id:t.id,expense_id:expense.id,category:type},{transaction});if(odometer!==null)if(!t.is_test)await recordMileage(t.vehicle_id,odometer,null,transaction);await Audit.create({user_id:req.user.id,action:'registrar_gasto',details:{trip_id:t.id,expense_id:expense.id,file_id:file.id}},{transaction});return {...expense.toJSON(),file_id:file.id};});if(odometer!==null&&!t.is_test)await dispatchAlerts(t.vehicle_id);res.json(result);}catch(e){if(document)await removeDocument(document);throw e;}});
+export const expensePost=wrap(async(req,res)=>{const t=await tripAccess(req,req.params.id);const {type,amount,notes=''}=req.body;if(!['combustible','peaje'].includes(type)||amount===''||amount==null||!Number.isFinite(+amount)||+amount<0)fail(400,'Gasto inválido');const odometer=type==='combustible'?km(req.body.odometer):null;let document,persisted=false;try{document=await storeDocument(req.file,true);if(req.sync)req.sync.cleanup=()=>removeDocument(document);const result=await operationTransaction(req,async transaction=>{const expense=await Expense.create({trip_id:t.id,type,amount,notes,odometer,...(req.sync?{created_at:req.sync.captured_at}:{})},{transaction});const file=await Attachment.create({...document,trip_id:t.id,expense_id:expense.id,category:type},{transaction});if(odometer!==null&&!t.is_test)await recordMileage(t.vehicle_id,odometer,null,transaction);await Audit.create({user_id:req.user.id,action:'registrar_gasto',details:{trip_id:t.id,expense_id:expense.id,file_id:file.id,...(req.sync?{operation_id:req.sync.id,captured_at:req.sync.captured_at}:{})}},{transaction});return {...expense.toJSON(),file_id:file.id};});persisted=true;if(odometer!==null&&!t.is_test&&!req.sync?.replayed)await dispatchAlerts(t.vehicle_id);res.json(result);}catch(e){if(document&&!persisted)await removeDocument(document);throw e;}});
 export const filePost = wrap(async (req, res) => {
   let t = await tripAccess(req, req.params.id),
     f = req.file;
@@ -180,20 +185,7 @@ export const filePost = wrap(async (req, res) => {
     ext = ".pdf";
   } else {
     try {
-      let image = sharp(buffer, { limitInputPixels: 40000000 });
-      let meta = await image.metadata();
-      if (!["jpeg", "png", "webp"].includes(meta.format))
-        fail(400, "Formato de imagen no admitido");
-      buffer = await image
-        .rotate()
-        .resize({
-          width: 2200,
-          height: 2200,
-          fit: "inside",
-          withoutEnlargement: true,
-        })
-        .jpeg({ quality: 85 })
-        .toBuffer();
+      buffer = await optimizeImage(buffer);
       mime = "image/jpeg";
       ext = ".jpg";
     } catch (e) {
