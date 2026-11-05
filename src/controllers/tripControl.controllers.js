@@ -1,3 +1,4 @@
+import {visibleTrip,isAdmin} from '../services/tripVisibility.service.js';
 import {operationTransaction} from '../services/operationTransaction.service.js';
 import User from '../models/User.js';import Operational from '../models/OperationalNotification.js';
 import {Op} from 'sequelize';import db from '../utils/connection.js';import Trip from '../models/Trip.js';import Stop from '../models/TripStop.js';import Charge from '../models/StandbyCharge.js';import Line from '../models/CollectionLine.js';import Revision from '../models/TripControlRevision.js';import Attachment from '../models/Attachment.js';
@@ -5,7 +6,14 @@ import {wrap,fail,validateId} from '../services/catalog.service.js';import {trip
 import {controlState,controlValues,controlFingerprint,applyControl,saveRevision,hash} from '../services/tripControl.service.js';import {stopClock,tripProgress} from '../services/tripStop.service.js';import {accrueTrip} from '../services/standby.service.js';import {dispatchAlerts} from '../services/maintenanceAlert.service.js';
 const confirmationType=(id,v,fingerprint)=>'trip_control:'+id+':'+hash({values:v,fingerprint});
 export const getControl=wrap(async(req,res)=>{
- const t=await tripAccess(req,req.params.id),state=await controlState(t);const billed=await Line.findAll({where:{trip_id:t.id,active:true}});
+ const t=await tripAccess(req,req.params.id);
+ if(!isAdmin(req.user)){
+  const stops=await Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']]});
+  const files=await Attachment.findAll({where:{trip_id:t.id,deleted_at:null,category:{[Op.in]:['guia','entrega']}},attributes:['id','original_name','category'],order:[['id','DESC']]});
+  const {metadata,...trip}=visibleTrip(t,req.user);
+  return res.json({trip,stops,files,progress:tripProgress(t,stops)});
+ }
+ const state=await controlState(t);const billed=await Line.findAll({where:{trip_id:t.id,active:true}});
  const revisions=await Revision.findAll({where:{trip_id:t.id},order:[['revision','DESC']],limit:100});
  const files=await Attachment.findAll({where:{trip_id:t.id,deleted_at:null,category:{[Op.in]:['guia','entrega']}},attributes:['id','original_name','category'],order:[['id','DESC']]});
  res.json({...state,progress:tripProgress(t,state.stops),billed:billed.length>0,charges:state.charges.map(c=>({...c,billed:billed.some(l=>String(l.charge_id)===String(c.id))})),revisions,files,fingerprint:controlFingerprint(state)});
@@ -26,7 +34,7 @@ export const recordOutcome=wrap(async(req,res)=>{
  const result=await operationTransaction(req,async transaction=>{
   await db.query('SELECT pg_advisory_xact_lock(782135)',{transaction});const t=await Trip.findByPk(req.params.id,{transaction,lock:transaction.LOCK.UPDATE});
   const previous=await Revision.findOne({where:{request_id},transaction});if(previous){if(String(previous.trip_id)!==String(t.id)||String(previous.user_id)!==String(req.user.id)||previous.request_hash!==requestHash)fail('El identificador ya se usó con otros datos',409);return {ok:true,duplicate:true,revision:previous.revision};}
-  if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');if(await Line.count({where:{trip_id:t.id,active:true},transaction}))fail('El viaje ya está incluido en un corte; solicita revisión al administrador.',409);
+  if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');if(await Line.count({where:{trip_id:t.id,active:true},transaction}))fail(isAdmin(req.user)?'El viaje ya está incluido en un corte; solicita revisión al administrador.':'Este viaje requiere revisión del administrador para registrar cambios.',409);
   if(outcome==='partial'&&tons>=Number(t.tonnage))fail('La entrega parcial debe ser menor al tonelaje total del viaje');
   const s=await Stop.findOne({where:{trip_id:t.id,position},transaction,lock:transaction.LOCK.UPDATE});if(!s?.arrived_at)fail('Primero debe registrarse la llegada al destino');if(!s.exception_resolved)fail('Este punto ya tiene una incidencia pendiente de revisión');
   const before=await controlState(t,transaction);await s.update({outcome,outcome_note:reason,outcome_at:s.received_at||stopClock(t,req),delivered_tons:tons,exception_resolved:false,received_at:null},{transaction});await accrueTrip(t,transaction,stopClock(t,req));await saveRevision(t,req.user,v,before,transaction,requestHash);const recipients=await User.findAll({where:{role:'admin',active:true},attributes:['id'],transaction});for(const id of new Set([String(t.driver_id),...recipients.map(u=>String(u.id))]))await Operational.create({user_id:id,trip_id:t.id,stop_id:s.id,phase:'incident'+t.control_revision,title:'Incidencia de entrega pendiente',message:`${t.code} · ${s.place.name}. ${outcome==='partial'?'Entrega parcial: '+tons+' t':outcome==='rejected'?'Entrega rechazada':'Entrega fallida'}. ${reason}. Requiere resolución del administrador antes del cierre y del corte.`},{transaction});

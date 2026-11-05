@@ -10,7 +10,7 @@ export async function inboxRows(user,folder='inbox'){
  const states=await State.findAll({where:{user_id:user.id}}),key=(kind,id)=>kind+':'+id,map=new Map(states.map(s=>[key(s.kind,s.notification_id),s]));
  async function rows(kind,Model,extra={}){const ids=states.filter(s=>s.kind===kind&&s.archived_at).map(s=>s.notification_id);if(folder==='archived'&&!ids.length)return [];
   const where={...extra,deleted_at:null,...(ids.length?{id:{[folder==='archived'?Op.in:Op.notIn]:ids}}:{})};
-  return (await Model.findAll({where,order:[['id','DESC']],limit:100})).map(n=>{const pref=map.get(key(kind,n.id));return {...n.toJSON(),kind,read_at:kind==='maintenance'?(pref?.read_at||null):n.read_at,archived_at:pref?.archived_at||null};});
+  return (await Model.findAll({where,order:[['id','DESC']],limit:100})).map(n=>{const pref=map.get(key(kind,n.id));const notice=n.toJSON();if(user.role!=='admin'&&kind==='trip')notice.message=notice.message?.replace(' El stand by posterior a esa salida queda en revisión hasta responder.',' Indica qué ocurrió para continuar.').replace(' antes del cierre y del corte.',' antes del cierre.');return {...notice,kind,read_at:kind==='maintenance'?(pref?.read_at||null):n.read_at,archived_at:pref?.archived_at||null};});
  }
  return [...await rows('trip',Operational,{user_id:user.id}),...(user.role==='admin'?await rows('maintenance',Notice):[])].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
 }
