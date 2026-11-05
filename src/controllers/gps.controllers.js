@@ -6,19 +6,19 @@ import {Op} from 'sequelize';import db from '../utils/connection.js';import Trip
 export function distance(a,b){const rad=x=>x*Math.PI/180,dlat=rad(+b.latitude-a.latitude),dlon=rad(+b.longitude-a.longitude),h=Math.sin(dlat/2)**2+Math.cos(rad(a.latitude))*Math.cos(rad(b.latitude))*Math.sin(dlon/2)**2;return 6371008.8*2*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h)));}
 async function ensureStops(t,transaction){if(!t.metadata?.origin_place||!t.metadata?.destination_places?.length)fail('Este viaje no tiene lugares georreferenciados. Usa un viaje nuevo.');for(const [position,place] of [t.metadata.origin_place,...t.metadata.destination_places].entries())await Stop.findOrCreate({where:{trip_id:t.id,position},defaults:{place},transaction});return Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction});}
 export const gpsPost=wrap(async(req,res)=>{
- validateId(req.params.id);const b=req.body||{},lat=Number(b.latitude),lng=Number(b.longitude),accuracy=Number(b.accuracy),at=new Date(b.timestamp);
+ validateId(req.params.id);const b=req.body||{},lat=Number(b.latitude),lng=Number(b.longitude),accuracy=Number(b.accuracy),at=new Date(b.timestamp),route_point=b.route_point!==false;
  if(b.latitude==null||b.longitude==null||b.accuracy==null||!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180||!Number.isFinite(accuracy)||accuracy<0||!Number.isFinite(at.getTime())||(!req.simulation&&!req.sync&&(Date.now()-at>120000||at-Date.now()>30000)))fail('Coordenada, precisión o fecha GPS inválida o antigua');
  const result=await operationTransaction(req,async transaction=>{
   const t=await Trip.findByPk(req.params.id,{transaction,lock:transaction.LOCK.UPDATE});
   if(req.simulation&&!t?.is_test)fail('Simulación no autorizada',403);
   if(!t||String(t.driver_id)!==String(req.user.id))fail('Solo el conductor asignado puede enviar su GPS',403);
-  if(t.status==='finalizado'&&req.sync){if(t.closed_at&&at<=new Date(t.closed_at)){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy},transaction});return {accepted:true,historical_only:true,status:t.status,route_complete:true};}return {accepted:false,ignored_after_close:true,status:t.status,route_complete:true};}if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');
+  if(t.status==='finalizado'&&req.sync){if(t.closed_at&&at<=new Date(t.closed_at)){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy,route_point},transaction});return {accepted:true,historical_only:true,status:t.status,route_complete:true};}return {accepted:false,ignored_after_close:true,status:t.status,route_complete:true};}if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');
   const stops=await ensureStops(t,transaction),stop=stops.find(s=>!s.departed_at);
   const limit=Math.max(25,Math.min(100,Number(stop?.place.radius_m||150)/2));
   if(accuracy>limit)fail(`Precisión GPS insuficiente (${Math.round(accuracy)} m). Se necesita ${limit} m o mejor; espera señal al aire libre.`);
   const last=await Sample.findOne({where:{trip_id:t.id},order:[['device_at','DESC']],transaction});
-  if(last&&at<=new Date(last.device_at)){if(req.sync){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy},transaction});return {accepted:true,historical_only:true,reason:'Coordenada conservada; no se retroceden transiciones ya detectadas',status:t.status};}return {accepted:false,reason:'Lectura ya recibida o fuera de orden'};}
-  await Sample.create({trip_id:t.id,latitude:lat,longitude:lng,accuracy,device_at:at},{transaction});
+  if(last&&at<=new Date(last.device_at)){if(req.sync){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy,route_point},transaction});return {accepted:true,historical_only:true,reason:'Coordenada conservada; no se retroceden transiciones ya detectadas',status:t.status};}return {accepted:false,reason:'Lectura ya recibida o fuera de orden'};}
+  await Sample.create({trip_id:t.id,latitude:lat,longitude:lng,accuracy,device_at:at,route_point},{transaction});
   if(t.status==='creado')await t.update({status:'en_curso',started_at:at},{transaction});
   let transition=null;
   if(stop){
@@ -39,7 +39,7 @@ export const gpsPost=wrap(async(req,res)=>{
      }
      await stop.update(values,{transaction});
      if(kind==='return')await clearStopNotices(t,stop,transaction);
-     await remindStop(t,stop,transaction,{force:true,at});
+     if(kind==='departure')await remindStop(t,stop,transaction,{force:true,at});
      await Audit.create({user_id:req.user.id,action:'gps.'+kind,details:{trip_id:t.id,stop_id:stop.id,at:detected,accuracy,distance_m:Math.round(d)}},{transaction});
      transition={phase:kind,stop_id:stop.id,name:stop.place.name};
     }
@@ -52,9 +52,10 @@ export const gpsPost=wrap(async(req,res)=>{
 });
 export const gpsState=wrap(async(req,res)=>{
  const t=await tripAccess(req,req.params.id);const stops=await Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']]});
- const [samples]=await db.query(`SELECT latitude,longitude,accuracy,device_at,total_samples FROM (SELECT latitude,longitude,accuracy,device_at,ROW_NUMBER() OVER (ORDER BY device_at,id) AS rn,COUNT(*) OVER () AS total_samples FROM gps_samples WHERE trip_id=:id) s WHERE rn=1 OR rn=total_samples OR MOD(rn-1,CAST(CEIL(total_samples/2000.0) AS bigint))=0 ORDER BY device_at`,{replacements:{id:t.id}});
+ const [samples]=await db.query(`SELECT latitude,longitude,accuracy,device_at,total_samples FROM (SELECT latitude,longitude,accuracy,device_at,ROW_NUMBER() OVER (ORDER BY device_at,id) AS rn,COUNT(*) OVER () AS total_samples FROM gps_samples WHERE trip_id=:id AND route_point=true) s WHERE rn=1 OR rn=total_samples OR MOD(rn-1,CAST(CEIL(total_samples/2000.0) AS bigint))=0 ORDER BY device_at`,{replacements:{id:t.id}});
  const documents=await Attachment.findAll({where:{trip_id:t.id,deleted_at:null},attributes:['id','original_name','mime']});
- res.json({stops:stops.map(s=>({...s.toJSON(),document_files:(s.arrival_file_ids?.length?s.arrival_file_ids:[s.arrival_file_id].filter(Boolean)).map(id=>documents.find(f=>String(f.id)===String(id))).filter(Boolean)})),samples,sample_count:Number(samples[0]?.total_samples||0),status:t.status});
+ const last_observed_at=await Sample.max('device_at',{where:{trip_id:t.id}});
+ res.json({last_observed_at,stops:stops.map(s=>({...s.toJSON(),document_files:(s.arrival_file_ids?.length?s.arrival_file_ids:[s.arrival_file_id].filter(Boolean)).map(id=>documents.find(f=>String(f.id)===String(id))).filter(Boolean)})),samples,sample_count:Number(samples[0]?.total_samples||0),status:t.status});
 });
 export const completeStop=wrap(async(req,res)=>{
  validateId(req.params.id);validateId(req.params.stop);const t=await tripAccess(req,req.params.id);

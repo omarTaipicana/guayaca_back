@@ -10,10 +10,10 @@ export async function finishTrip(t,stops,transaction){if(stops.length&&stops.eve
 export async function clearStopNotices(t,s,transaction){await Operational.update({read_at:new Date()},{where:{stop_id:s.id,user_id:t.driver_id,read_at:null},transaction});}
 export async function remindStop(t,s,transaction,{force=false,at=stopClock(t)}={}){
  const decision=s.exit_state==='pending'||s.exit_state==='review';
- if(!s.arrived_at||(!decision&&documented(s))||(!force&&s.reminded_at&&at-new Date(s.reminded_at)<600000))return;
+ if(!s.outside_at||documented(s))return;
  const needs=[...(!s.arrival_file_id&&!s.document_waived?[s.position===0?'guía de embarque':'documento de entrega']:[]),...(s.arrival_odometer==null?['kilometraje del punto']:[]),...(decision?['confirmar si entregaste o sigues esperando (hotel/comida/otra novedad)']:[])];
- // A new row makes recurring reminders audible to existing bell clients; one per ten-minute interval.
- const phase='r'+Math.floor(+at/600000)+':'+(decision?'x':'d')+String((s.exit_history||[]).length);
+ // One notification for each actual departure, including during offline replay.
+ const phase='salida:'+new Date(s.outside_at).getTime().toString(36);
  await Operational.findOrCreate({where:{user_id:t.driver_id,stop_id:s.id,phase},defaults:{trip_id:t.id,title:decision?'Confirma la salida de entrega':'Pendientes del punto del viaje',message:`${t.code} · ${s.place.name}. Falta: ${needs.join(', ')}. ${decision?'La salida física no confirma la entrega. El stand by posterior a esa salida queda en revisión hasta responder.':'Completa estos datos una sola vez; no se vuelven a pedir al salir.'}`},transaction});
  await s.update({reminded_at:at},{transaction});
 }

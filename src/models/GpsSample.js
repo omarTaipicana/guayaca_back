@@ -1,1 +1,2 @@
-import db from '../utils/connection.js';import {gpsFields} from '../migrations/009-gps-stops.js';export default db.define('GpsSample',gpsFields,{tableName:'gps_samples',timestamps:false,freezeTableName:true});
+import {DataTypes} from 'sequelize';
+import db from '../utils/connection.js';import {gpsFields} from '../migrations/009-gps-stops.js';export default db.define('GpsSample',{...gpsFields,route_point:{type:DataTypes.BOOLEAN,defaultValue:true,allowNull:false}},{tableName:'gps_samples',timestamps:false,freezeTableName:true});

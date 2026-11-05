@@ -1,3 +1,4 @@
+import {issueAndroidSession,revokeAndroidSession} from '../services/androidSession.service.js';
 import {activateAccount} from "../services/invitation.service.js";
 import {requestPasswordReset, resetPassword} from "../services/passwordRecovery.service.js";
 import {
@@ -12,6 +13,10 @@ import {
   audit,
   token,
 } from "../services/shared.service.js";
+async function loginResponse(req,res,u){
+ const access=req.body.client==='android'?await issueAndroidSession(u):token(u);
+ res.set('Cache-Control','no-store').json({token:access,user:safe(u)});
+}
 export const loginPost = wrap(async (req, res) => {
   let email = String(req.body.email || "")
       .toLowerCase()
@@ -33,7 +38,7 @@ export const loginPost = wrap(async (req, res) => {
     return res.json({ step: "2fa", challenge: id });
   }
   await audit(u, "inicio_sesion");
-  res.json({ token: token(u), user: safe(u) });
+  await loginResponse(req,res,u);
 });
 export const codePost = wrap(async (req, res) => {
   const type =
@@ -47,17 +52,18 @@ export const codePost = wrap(async (req, res) => {
   if (type === "verify")
     await User.update({ email_verified: true }, { where: { id } });
   const u = await User.findByPk(id);
-  if (!u || !u.active) fail(403, "Usuario inactivo");
+  if (!u || !u.active || u.setup_pending) fail(403, "Usuario inactivo");
   if (type === "verify" && u.two_factor) {
     const c = await challenge(u, "login");
     return res.json({ step: "2fa", challenge: c });
   }
   await audit(u, "inicio_sesion");
-  res.json({ token: token(u), user: safe(u) });
+  await loginResponse(req,res,u);
 });
 export const meGet = (req, res) => res.json(safe(req.user));
 export const logoutPost = wrap(async (req, res) => {
-  await User.update(
+  if(req.androidSession)await revokeAndroidSession(req.androidSession,req.user.id);
+  else await User.update(
     { session_version: literal("session_version + 1") },
     { where: { id: req.user.id } },
   );
