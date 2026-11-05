@@ -1,3 +1,4 @@
+import {Op} from 'sequelize';
 import {documentFiles} from '../services/document.service.js';
 import crypto from 'node:crypto';import Receipt from '../models/OfflineOperation.js';import Trip from '../models/Trip.js';import Stop from '../models/TripStop.js';import {wrap,fail,validateId} from '../services/catalog.service.js';import {tripAccess} from '../services/shared.service.js';
 import {gpsPost,completeStop,resolveExit} from './gps.controllers.js';import {expensePost} from './trip.controllers.js';import {recordOutcome} from './tripControl.controllers.js';
@@ -21,4 +22,13 @@ export const synchronize=wrap(async(req,res)=>{
  req.body=op.body;req.sync={id:op.id,kind:op.kind,hash,captured_at:at.toISOString()};
  const result=await invoke(handlers[op.kind],req);const receipt=await Receipt.findByPk(op.id);if(!receipt)fail('La operación no obtuvo confirmación persistente',500);
  res.json({confirmed:true,id:op.id,result,confirmed_at:receipt.confirmed_at,replayed:!!req.sync.replayed});
+});
+
+export const deletedTrips=wrap(async(req,res)=>{
+ const ids=req.body?.trip_ids;
+ if(!Array.isArray(ids)||ids.length>100||ids.some(id=>typeof id!=='string'||! /^[1-9]\d{0,18}$/.test(id)||BigInt(id)>9223372036854775807n))fail('Lista de viajes inválida');
+ const rows=ids.length?await Trip.unscoped().findAll({
+  attributes:['id'],where:{id:{[Op.in]:ids},deleted_at:{[Op.ne]:null},...(req.user.role==='admin'?{}:{driver_id:req.user.id})}
+ }):[];
+ res.set('Cache-Control','no-store').json({deleted_trip_ids:rows.map(t=>String(t.id))});
 });

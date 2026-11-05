@@ -1,2 +1,2 @@
-import {Router} from 'express';import {auth,allow} from '../middlewares/verifyJWT.js';import {uploadDocuments} from '../middlewares/upload.js';import {synchronize} from '../controllers/offline.controllers.js';
-const router=Router();router.post('/api/offline/operations',auth,uploadDocuments.array('file',10),synchronize);export default router;
+import {Router} from 'express';import {auth,allow} from '../middlewares/verifyJWT.js';import {uploadDocuments} from '../middlewares/upload.js';import {synchronize,deletedTrips} from '../controllers/offline.controllers.js';
+const router=Router();router.post('/api/offline/deleted-trips',auth,allow('viajes'),deletedTrips);router.post('/api/offline/operations',auth,uploadDocuments.array('file',10),synchronize);export default router;
