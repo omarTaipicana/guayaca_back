@@ -3,7 +3,8 @@ import {inboxRows} from '../services/notificationInbox.service.js';
 import {accrueTrip} from '../services/standby.service.js';
 import {documented,stopClock,history,finishTrip,clearStopNotices,remindStop} from '../services/tripStop.service.js';
 import {Op} from 'sequelize';import db from '../utils/connection.js';import Trip from '../models/Trip.js';import Stop from '../models/TripStop.js';import Sample from '../models/GpsSample.js';import Operational from '../models/OperationalNotification.js';import Notification from '../models/Notification.js';import Attachment from '../models/Attachment.js';import Audit from '../models/Audit.js';import {wrap,fail,validateId} from '../services/catalog.service.js';import {tripAccess} from '../services/shared.service.js';import {recordMileage,dispatchAlerts,km} from '../services/maintenanceAlert.service.js';import {storeDocuments,removeDocument} from '../services/document.service.js';
-export function distance(a,b){const rad=x=>x*Math.PI/180,dlat=rad(+b.latitude-a.latitude),dlon=rad(+b.longitude-a.longitude),h=Math.sin(dlat/2)**2+Math.cos(rad(a.latitude))*Math.cos(rad(b.latitude))*Math.sin(dlon/2)**2;return 6371008.8*2*Math.atan2(Math.sqrt(h),Math.sqrt(Math.max(0,1-h)));}
+import {gpsCandidate,MAX_ROUTE_ACCURACY} from '../services/gpsRouting.js';
+export {distance} from '../services/gpsRouting.js';
 async function ensureStops(t,transaction){if(!t.metadata?.origin_place||!t.metadata?.destination_places?.length)fail('Este viaje no tiene lugares georreferenciados. Usa un viaje nuevo.');for(const [position,place] of [t.metadata.origin_place,...t.metadata.destination_places].entries())await Stop.findOrCreate({where:{trip_id:t.id,position},defaults:{place},transaction});return Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction});}
 export const gpsPost=wrap(async(req,res)=>{
  validateId(req.params.id);const b=req.body||{},lat=Number(b.latitude),lng=Number(b.longitude),accuracy=Number(b.accuracy),at=new Date(b.timestamp),route_point=b.route_point!==false;
@@ -13,20 +14,19 @@ export const gpsPost=wrap(async(req,res)=>{
   if(req.simulation&&!t?.is_test)fail('Simulación no autorizada',403);
   if(!t||String(t.driver_id)!==String(req.user.id))fail('Solo el conductor asignado puede enviar su GPS',403);
   if(t.status==='finalizado'&&req.sync){if(t.closed_at&&at<=new Date(t.closed_at)){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy,route_point},transaction});return {accepted:true,historical_only:true,status:t.status,route_complete:true};}return {accepted:false,ignored_after_close:true,status:t.status,route_complete:true};}if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');
-  const stops=await ensureStops(t,transaction),stop=stops.find(s=>!s.departed_at);
-  const limit=Math.max(25,Math.min(100,Number(stop?.place.radius_m||150)/2));
-  if(accuracy>limit)fail(`Precisión GPS insuficiente (${Math.round(accuracy)} m). Se necesita ${limit} m o mejor; espera señal al aire libre.`);
+  const stops=await ensureStops(t,transaction);
+  if(accuracy>MAX_ROUTE_ACCURACY)fail(`Precisión GPS insuficiente (${Math.round(accuracy)} m). Se necesita ${MAX_ROUTE_ACCURACY} m o mejor; espera señal al aire libre.`);
   const last=await Sample.findOne({where:{trip_id:t.id},order:[['device_at','DESC']],transaction});
   if(last&&at<=new Date(last.device_at)){if(req.sync){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy,route_point},transaction});return {accepted:true,historical_only:true,reason:'Coordenada conservada; no se retroceden transiciones ya detectadas',status:t.status};}return {accepted:false,reason:'Lectura ya recibida o fuera de orden'};}
   await Sample.create({trip_id:t.id,latitude:lat,longitude:lng,accuracy,device_at:at,route_point},{transaction});
   if(t.status==='creado')await t.update({status:'en_curso',started_at:at},{transaction});
   let transition=null;
-  if(stop){
-   if(last&&at-new Date(last.device_at)>90000)await stop.update({candidate_type:null,candidate_at:null,candidate_count:0},{transaction});
-   const d=distance({latitude:lat,longitude:lng},stop.place),inside=d<=Number(stop.place.radius_m||150),outside=d>=Number(stop.place.radius_m||150)+Math.max(50,accuracy);
-   const kind=!stop.arrived_at?(inside?'arrival':null):stop.outside_at?(inside?'return':null):(outside?'departure':null);
-   if(!kind)await stop.update({candidate_type:null,candidate_at:null,candidate_count:0},{transaction});
-   else if(stop.candidate_type!==kind||!stop.candidate_at)await stop.update({candidate_type:kind,candidate_at:at,candidate_count:1},{transaction});
+  const candidate=gpsCandidate(stops,b);
+  const reset={candidate_type:null,candidate_at:null,candidate_count:0};
+  for(const s of stops)if(s.candidate_type&&(s!==candidate?.stop||last&&at-new Date(last.device_at)>90000))await s.update(reset,{transaction});
+  if(candidate){
+   const {stop,kind,d}=candidate;
+   if(stop.candidate_type!==kind||!stop.candidate_at)await stop.update({candidate_type:kind,candidate_at:at,candidate_count:1},{transaction});
    else{
     await stop.update({candidate_count:stop.candidate_count+1},{transaction});
     if(at-new Date(stop.candidate_at)>=20000&&stop.candidate_count>=2){
@@ -68,7 +68,7 @@ export const completeStop=wrap(async(req,res)=>{
    const s=await Stop.findOne({where:{id:req.params.stop,trip_id:t.id},transaction,lock:transaction.LOCK.UPDATE});if(!s?.arrived_at)fail('Todavía no hay detección GPS de llegada',req.sync?409:400);
    if(documented(s))fail('Este punto ya tiene kilometraje y documento registrados');if(req.sync&&new Date(req.sync.captured_at)<new Date(s.arrived_at)-120000)fail('El registro del documento es anterior a la llegada GPS; revisa el punto y la hora con el administrador',409);
    const chronological=await Stop.findAll({where:{trip_id:t.id},transaction});
-   for(const row of chronological){if(String(row.id)===String(s.id)||row.arrival_odometer==null)continue;if((row.position<s.position&&Number(row.arrival_odometer)>odometer)||(row.position>s.position&&Number(row.arrival_odometer)<odometer))fail('El kilometraje no es coherente con los otros puntos registrados del viaje');}
+   for(const row of chronological){if(String(row.id)===String(s.id)||row.arrival_odometer==null||!row.arrived_at)continue;if((new Date(row.arrived_at)<new Date(s.arrived_at)&&Number(row.arrival_odometer)>odometer)||(new Date(row.arrived_at)>new Date(s.arrived_at)&&Number(row.arrival_odometer)<odometer))fail('El kilometraje no es coherente con los otros puntos registrados del viaje');}
    const files=[];for(const document of documents)files.push(await Attachment.create({...document,trip_id:t.id,category:s.position===0?'guia':'entrega'},{transaction}));const file=files[0];
    // A late upload after confirmed delivery must preserve its original completion time.
    await s.update({arrival_odometer:odometer,arrival_file_id:file.id,arrival_file_ids:files.map(f=>String(f.id)),...(s.position>0&&s.outcome==='pending'?{outcome:'delivered'}:{}),...(s.position>0&&!['partial','rejected','failed'].includes(s.outcome)&&!s.received_at?{received_at:req.sync?new Date(Math.max(+new Date(s.arrived_at),Math.min(+stopClock(locked,req),s.exit_state!=='waiting'&&s.outside_at?+new Date(s.outside_at):Infinity))):s.exit_state==='waiting'?stopClock(locked,req):(s.outside_at||stopClock(locked,req))}:{}),...(s.position>0&&s.outside_at&&!['partial','rejected','failed'].includes(s.outcome)?{departed_at:s.exit_state==='waiting'?stopClock(locked,req):s.outside_at,exit_state:['partial','rejected','failed'].includes(s.outcome)?'incident':'delivered',exit_history:history(s,'documented_after_exit',stopClock(locked,req),{user_id:req.user.id})}:{})},{transaction});
