@@ -23,13 +23,13 @@ export function controlValues(body){
   if(!/^[1-9]\d*$/.test(String(v.charge_id))||!['approved','void'].includes(v.decision))fail('Selecciona el cargo y aprobar o anular');result.charge_id=String(v.charge_id);result.decision=v.decision;
  }else if(v.action==='settle'){
   const n=Number(v.base_amount);if(v.base_amount===''||v.base_amount==null||!Number.isFinite(n)||n<0||n>9999999999||Math.abs(n*100-Math.round(n*100))>0.0001)fail('Indica el flete autorizado, máximo dos decimales');result.base_amount=n;
- }else fail('Operación no permitida');return result;
+ }else if(v.action!=='force_close')fail('Operación no permitida');return result;
 }
 export function validateTimeline(stops,now){let lastDeparture=null,lastKm=null;
- for(const s of stops){const a=s.arrived_at?+new Date(s.arrived_at):null,d=s.departed_at?+new Date(s.departed_at):null,r=s.received_at?+new Date(s.received_at):null;
+ for(const s of [...stops].sort((a,b)=>(a.arrived_at?+new Date(a.arrived_at):Infinity)-(b.arrived_at?+new Date(b.arrived_at):Infinity)||a.position-b.position)){const a=s.arrived_at?+new Date(s.arrived_at):null,d=s.departed_at?+new Date(s.departed_at):null,r=s.received_at?+new Date(s.received_at):null;
   if([a,d,r].some(x=>x!=null&&x>+now+30000))fail('No se permiten horarios futuros');
   if((d!=null||r!=null)&&a==null)fail('Registra primero la llegada al punto');if(a!=null&&d!=null&&d<a)fail('La salida no puede ser anterior a la llegada');if(r!=null&&(r<a||d!=null&&r>d))fail('La recepción debe estar entre llegada y salida');if(a!=null&&lastDeparture!=null&&a<lastDeparture)fail('La llegada debe ser posterior a la salida del punto anterior');if(d!=null)lastDeparture=d;
-  if(s.arrival_odometer!=null){const km=Number(s.arrival_odometer);if(lastKm!=null&&km<lastKm)fail('Los kilometrajes deben mantener el orden de los puntos');lastKm=km;}
+  if(s.arrival_odometer!=null){const km=Number(s.arrival_odometer);if(lastKm!=null&&km<lastKm)fail('Los kilometrajes deben seguir el orden real de las llegadas');lastKm=km;}
  }
 }
 export async function ensurePlannedStops(t,transaction){if(!t.metadata?.origin_place||!t.metadata?.destination_places?.length)fail('Este viaje no tiene ruta georreferenciada de esta versión');for(const [position,place] of [t.metadata.origin_place,...t.metadata.destination_places].entries())await Stop.findOrCreate({where:{trip_id:t.id,position},defaults:{place},transaction});return Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction});}
@@ -40,7 +40,14 @@ export async function saveRevision(t,user,v,before,transaction,requestHash=hash(
 }
 export async function applyControl(t,user,v,transaction){
  const before=await controlState(t,transaction),now=stopClock(t);
- if(v.action==='correct'){
+ if(v.action==='force_close'){
+  if(user.role!=='admin')fail('Solo administrador',403);
+  if(!['creado','en_curso'].includes(t.status))fail('El viaje ya está cerrado',409);
+  const closed_at=t.is_test?now:new Date();
+  await t.update({status:'finalizado',closed_at},{transaction});
+  await accrueTrip(t,transaction,closed_at);
+  await Operational.update({read_at:new Date()},{where:{trip_id:t.id,user_id:t.driver_id,read_at:null,phase:{[Op.like]:'salida:%'}},transaction});
+ }else if(v.action==='correct'){
   if(await Line.count({where:{trip_id:t.id,active:true},transaction}))fail('El viaje está incluido en un corte activo. Primero retira ese corte con su confirmación para corregir y volver a generar el reporte.',409);
   const stops=await ensurePlannedStops(t,transaction),s=stops.find(s=>s.position===v.position);if(!s)fail('Punto no encontrado');
   if(v.patch.document_waived&&s.position===0)fail('El embarque requiere guía; no permite exención');if(v.patch.document_waived&&!['partial','rejected','failed'].includes(s.outcome))fail('Solo se puede eximir documento con una incidencia de entrega registrada');
@@ -52,7 +59,7 @@ export async function applyControl(t,user,v,transaction){
   const first=stops[0];if(first?.arrived_at&&(!t.started_at||new Date(t.started_at)>new Date(first.arrived_at)))await t.update({started_at:first.arrived_at,status:t.status==='creado'?'en_curso':t.status},{transaction});
   // A corrected date invalidates approval of unbilled charges; each retained day is reviewed again.
   await Charge.update({review_status:'pending',reviewed_at:null,reviewed_by:null,review_reason:null},{where:{trip_id:t.id},transaction});
-  if(!t.is_test&&v.patch.arrival_odometer!=null)await recordMileage(t.vehicle_id,v.patch.arrival_odometer,null,transaction);await accrueTrip(t,transaction,now);await finishTrip(t,stops,transaction);if(t.status==='finalizado')await t.update({closed_at:stops.at(-1).departed_at},{transaction});
+  if(!t.is_test&&v.patch.arrival_odometer!=null)await recordMileage(t.vehicle_id,v.patch.arrival_odometer,null,transaction);await accrueTrip(t,transaction,now);await finishTrip(t,stops,transaction);
  }else if(v.action==='standby'){
   const c=await Charge.findOne({where:{id:v.charge_id,trip_id:t.id},transaction,lock:transaction.LOCK.UPDATE});if(!c||!c.calculation_valid)fail('El cargo ya no es válido para los horarios actuales');
   if(await Line.count({where:{charge_id:c.id,active:true},transaction}))fail('Este cargo ya pertenece a un corte activo. Retira el corte antes de modificarlo.',409);
