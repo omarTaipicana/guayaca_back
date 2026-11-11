@@ -84,7 +84,8 @@ export const tripGet = wrap(async (req, res) => {
     order: [["id", "ASC"]],
   });
   const deliveries=await Delivery.findAll({where:{trip_id:t.id},order:[['position','ASC']]});
-  res.json({ trip: visibleTrip(t,req.user), events, expenses, files,deliveries });
+  const vehicle=await Vehicle.findByPk(t.vehicle_id,{attributes:["current_odometer","initial_odometer"]});
+  res.json({ trip: visibleTrip(t,req.user), vehicle_odometer:vehicle?.current_odometer??vehicle?.initial_odometer??null, events, expenses, files,deliveries });
 });
 export const eventPost = wrap(async (req, res) => {
   const eventTrip=await tripAccess(req, req.params.id);if(eventTrip.metadata?.route)fail(409,'Las llegadas y salidas de este viaje se registran por GPS. Completa sus pendientes de kilometraje y guía.');
