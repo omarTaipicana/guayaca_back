@@ -6,9 +6,18 @@ import Operational from '../models/OperationalNotification.js';
 export const documented=s=>Boolean((s.arrival_file_id||s.document_waived)&&s.arrival_odometer!=null);
 export const stopClock=(t,req)=>t.is_test&&t.test_clock?new Date(t.test_clock):req?.sync?.captured_at?new Date(req.sync.captured_at):new Date();
 export const history=(s,event,at,extra={})=>[...(s.exit_history||[]),{event,at:new Date(at).toISOString(),...extra}];
-export async function finishTrip(t,stops,transaction){if(stops.length&&stops.every(s=>s.departed_at&&documented(s)&&s.exception_resolved!==false))await t.update({status:'finalizado',closed_at:new Date(Math.max(...stops.map(s=>+new Date(s.departed_at))))},{transaction});}
+export function manualPending(stop) {
+ return [
+  ...(!stop?.arrived_at ? ['Llegada'] : []),
+  ...(!stop?.departed_at ? ['Salida'] : []),
+  ...(!stop?.arrival_file_id && !stop?.document_waived ? ['Documento'] : []),
+  ...(stop?.exception_resolved === false ? ['Incidencia por resolver'] : []),
+ ];
+}
+export async function finishTrip(t,stops,transaction,{manual=false}={}){if(stops.length&&stops.every(s=>manual?!manualPending(s).length:s.departed_at&&documented(s)&&s.exception_resolved!==false))await t.update({status:'finalizado',closed_at:new Date(Math.max(...stops.map(s=>+new Date(s.departed_at))))},{transaction});}
 export async function clearStopNotices(t,s,transaction){await Operational.update({read_at:new Date()},{where:{stop_id:s.id,user_id:t.driver_id,read_at:null},transaction});}
 export async function remindStop(t,s,transaction,{force=false,at=stopClock(t)}={}){
+ if(t.metadata?.manual_recorded_at&&!t.metadata?.driver_started_at)return;
  const decision=s.exit_state==='pending'||s.exit_state==='review';
  if(!s.outside_at||documented(s))return;
  const needs=[...(!s.arrival_file_id&&!s.document_waived?[s.position===0?'guía de embarque':'documento de entrega']:[]),...(s.arrival_odometer==null?['kilometraje del punto']:[]),...(decision?['confirmar si entregaste o sigues esperando (hotel/comida/otra novedad)']:[])];

@@ -24,7 +24,7 @@ async function main() {
   const { default: app } = await import("./app.js");
   const PORT = Number(process.env.PORT || 8088);
   app.listen(PORT, process.env.HOST || "127.0.0.1", () =>
-    console.log(`GUAYACA API v0.4.2 puerto ${PORT}`),
+    console.log(`GUAYACA API v0.4.10 puerto ${PORT}`),
   );
 }
 main().catch((e) => {

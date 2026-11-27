@@ -3,7 +3,7 @@ import {recordMileage} from './maintenanceAlert.service.js';
 import crypto from 'node:crypto';
 import {Op} from 'sequelize';
 import Trip from '../models/Trip.js';import Stop from '../models/TripStop.js';import Charge from '../models/StandbyCharge.js';import Line from '../models/CollectionLine.js';import Revision from '../models/TripControlRevision.js';import Attachment from '../models/Attachment.js';import Audit from '../models/Audit.js';
-import {fail} from './catalog.service.js';import {tripProgress,stopClock,finishTrip,clearStopNotices} from './tripStop.service.js';import {accrueTrip} from './standby.service.js';
+import {fail} from './catalog.service.js';import {tripProgress,stopClock,finishTrip,clearStopNotices,manualPending} from './tripStop.service.js';import {accrueTrip} from './standby.service.js';
 export const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 export async function controlState(t,transaction){const stops=await Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction}),charges=await Charge.findAll({where:{trip_id:t.id},order:[['id','ASC']],transaction});return {trip:{id:t.id,status:t.status,started_at:t.started_at,closed_at:t.closed_at,base_amount:t.base_amount,standby_amount:t.standby_amount,control_revision:t.control_revision},stops:stops.map(s=>s.toJSON()),charges:charges.map(c=>c.toJSON())};}
 export const controlFingerprint=state=>hash(state);
@@ -35,11 +35,11 @@ export function validateTimeline(stops,now){let lastDeparture=null,lastKm=null;
 export async function ensurePlannedStops(t,transaction){if(!t.metadata?.origin_place||!t.metadata?.destination_places?.length)fail('Este viaje no tiene ruta georreferenciada de esta versión');for(const [position,place] of [t.metadata.origin_place,...t.metadata.destination_places].entries())await Stop.findOrCreate({where:{trip_id:t.id,position},defaults:{place},transaction});return Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction});}
 export async function saveRevision(t,user,v,before,transaction,requestHash=hash(v)){
  await t.update({control_revision:t.control_revision+1},{transaction});const after=await controlState(t,transaction);
- const row=await Revision.create({trip_id:t.id,user_id:user.id,revision:t.control_revision,action:v.action,reason:v.reason,before,after,request_id:v.request_id,request_hash:requestHash},{transaction});
- await Audit.create({user_id:user.id,action:'viaje.control_'+v.action,details:{trip_id:t.id,revision:t.control_revision,reason:v.reason,two_factor:v.action!=='outcome'}},{transaction});return row;
+ const row=await Revision.create({trip_id:t.id,user_id:user.id,revision:t.control_revision,action:v.action,reason:v.reason,before,after:v.manualResult?{...after,manual_result:v.manualResult}:after,request_id:v.request_id,request_hash:requestHash},{transaction});
+ await Audit.create({user_id:user.id,action:'viaje.control_'+v.action,details:{trip_id:t.id,revision:t.control_revision,reason:v.reason,two_factor:!['outcome','manual'].includes(v.action)}},{transaction});return row;
 }
-export async function applyControl(t,user,v,transaction){
- const before=await controlState(t,transaction),now=stopClock(t);
+export async function applyControl(t,user,v,transaction,requestHash){
+ const before=await controlState(t,transaction),now=v.manualCorrection?new Date():stopClock(t);
  if(v.action==='force_close'){
   if(user.role!=='admin')fail('Solo administrador',403);
   if(!['creado','en_curso'].includes(t.status))fail('El viaje ya está cerrado',409);
@@ -53,13 +53,31 @@ export async function applyControl(t,user,v,transaction){
   if(v.patch.document_waived&&s.position===0)fail('El embarque requiere guía; no permite exención');if(v.patch.document_waived&&!['partial','rejected','failed'].includes(s.outcome))fail('Solo se puede eximir documento con una incidencia de entrega registrada');
   if(v.patch.arrival_file_id){const f=await Attachment.findOne({where:{id:v.patch.arrival_file_id,trip_id:t.id,deleted_at:null,category:{[Op.in]:['guia','entrega']}},transaction});if(!f)fail('Documento no disponible en este viaje');}
   const merged=stops.map(x=>String(x.id)===String(s.id)?{...x.toJSON(),...v.patch}:x.toJSON());validateTimeline(merged,now);
-  if(t.status==='finalizado'&&merged.some(x=>!x.departed_at||!((x.arrival_file_id||x.document_waived)&&x.arrival_odometer!=null)||!x.exception_resolved))fail('Esta corrección reabriría un viaje cerrado. Conserva sus datos completos; no se permite reabrirlo desde esta operación.');
-  await s.update({...v.patch,...(v.patch.arrival_file_id?{arrival_file_ids:[String(v.patch.arrival_file_id),...(s.arrival_file_ids||[]).slice(1).filter(id=>String(id)!==String(v.patch.arrival_file_id))]}:{}),...('departed_at' in v.patch?{outside_at:v.patch.departed_at,exit_state:v.patch.departed_at?(['partial','rejected','failed'].includes(s.outcome)?'incident':'delivered'):null}:{}),candidate_at:null,candidate_count:0,candidate_type:null},{transaction});
+  if(v.manualCorrection){
+   const visited=merged.filter(point=>point.arrived_at).sort((a,b)=>new Date(a.arrived_at)-new Date(b.arrived_at)||a.position-b.position);
+   if(visited.slice(0,-1).some(point=>!point.departed_at))fail('Registra la salida de cada punto anterior');
+   if(merged.some(point=>point.departure_odometer!=null&&!point.departed_at))fail('Registra la hora de salida antes del kilometraje de salida');
+   const readings=visited.flatMap(point=>[point.arrival_odometer,point.departure_odometer]).filter(value=>value!=null).map(Number);
+   if(readings.some((value,index)=>index>0&&value<readings[index-1]))fail('El kilometraje no puede disminuir entre puntos, llegadas y salidas');
+   if(v.startedAt&&merged[0]?.arrived_at&&new Date(v.startedAt)>new Date(merged[0].arrived_at))fail('La salida del domicilio no puede ser posterior a la llegada al embarque');
+  }
+  const manualClosure=v.manualCorrection&&(t.status!=='finalizado'||Boolean(t.metadata?.manual_recorded_at)&&stops.some(point=>point.arrival_odometer==null));
+  if(t.status==='finalizado'&&merged.some(x=>manualClosure?manualPending(x).length:!x.departed_at||!((x.arrival_file_id||x.document_waived)&&x.arrival_odometer!=null)||!x.exception_resolved))fail('Esta corrección reabriría un viaje cerrado. Conserva sus datos completos; no se permite reabrirlo desde esta operación.');
+  await s.update({...v.patch,...(v.patch.arrival_file_id&&!v.patch.arrival_file_ids?{arrival_file_ids:[String(v.patch.arrival_file_id),...(s.arrival_file_ids||[]).slice(1).filter(id=>String(id)!==String(v.patch.arrival_file_id))]}:{}),...('departed_at' in v.patch?{outside_at:v.patch.departed_at,exit_state:v.patch.departed_at?(['partial','rejected','failed'].includes(s.outcome)?'incident':'delivered'):null}:{}),candidate_at:null,candidate_count:0,candidate_type:null},{transaction});
   for(const stop of stops)if(stop.arrival_file_id&&stop.arrival_odometer!=null)await clearStopNotices(t,stop,transaction);
+  if(v.startedAt)await t.update({started_at:v.startedAt,metadata:{...t.metadata,manual_departure_at:v.startedAt}},{transaction});
   const first=stops[0];if(first?.arrived_at&&(!t.started_at||new Date(t.started_at)>new Date(first.arrived_at)))await t.update({started_at:first.arrived_at,status:t.status==='creado'?'en_curso':t.status},{transaction});
   // A corrected date invalidates approval of unbilled charges; each retained day is reviewed again.
   await Charge.update({review_status:'pending',reviewed_at:null,reviewed_by:null,review_reason:null},{where:{trip_id:t.id},transaction});
-  if(!t.is_test&&v.patch.arrival_odometer!=null)await recordMileage(t.vehicle_id,v.patch.arrival_odometer,null,transaction);await accrueTrip(t,transaction,now);await finishTrip(t,stops,transaction);
+  const reading=v.patch.departure_odometer??v.patch.arrival_odometer;
+  if(!t.is_test&&reading!=null)await recordMileage(t.vehicle_id,reading,null,transaction);
+  if(!manualClosure)await accrueTrip(t,transaction,now);
+  await finishTrip(t,stops,transaction,{manual:manualClosure});
+  if(manualClosure&&t.status==='finalizado'){
+   await t.update({metadata:{...t.metadata,manual_recorded_at:t.metadata?.manual_recorded_at??now.toISOString()}},{transaction});
+   for(const point of stops)await clearStopNotices(t,point,transaction);
+  }
+  if(manualClosure)await accrueTrip(t,transaction,now);
  }else if(v.action==='standby'){
   const c=await Charge.findOne({where:{id:v.charge_id,trip_id:t.id},transaction,lock:transaction.LOCK.UPDATE});if(!c||!c.calculation_valid)fail('El cargo ya no es válido para los horarios actuales');
   if(await Line.count({where:{charge_id:c.id,active:true},transaction}))fail('Este cargo ya pertenece a un corte activo. Retira el corte antes de modificarlo.',409);
@@ -69,5 +87,5 @@ export async function applyControl(t,user,v,transaction){
   const stops=await Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction});if(!stops.some(s=>!s.exception_resolved))fail('No hay incidencias pendientes para resolver');
   for(const s of stops)if(!s.exception_resolved){await s.update({exception_resolved:true},{transaction});await Operational.update({read_at:new Date()},{where:{stop_id:s.id,phase:{[Op.like]:'incident%'}},transaction});}await t.update({base_amount:v.base_amount},{transaction});await accrueTrip(t,transaction,now);await finishTrip(t,stops,transaction);
  }
- await saveRevision(t,user,v,before,transaction);return {ok:true,revision:t.control_revision,progress:tripProgress(t,await Stop.findAll({where:{trip_id:t.id},transaction}))};
+ await saveRevision(t,user,v,before,transaction,requestHash);return {ok:true,revision:t.control_revision,progress:tripProgress(t,await Stop.findAll({where:{trip_id:t.id},transaction}))};
 }

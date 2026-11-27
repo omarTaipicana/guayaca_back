@@ -1,10 +1,11 @@
+import { manualTripGet, manualTripPost, manualCorrectionCode, manualCorrectionUnlock, manualCorrectionSave } from '../controllers/manualTrip.controllers.js';
 import {simulate} from '../controllers/simulation.controllers.js';
 import {getMode,setMode} from '../controllers/tripMode.controllers.js';
 import rateLimit from 'express-rate-limit';
 import {tripOptions,quoteTrip} from '../controllers/tripQuote.controllers.js';
 import { Router } from "express";
 import { auth, allow, admin } from "../middlewares/verifyJWT.js";
-import { upload } from "../middlewares/upload.js";
+import { upload, uploadDocuments } from "../middlewares/upload.js";
 import {
   tripsGet,
   tripsPost,
@@ -29,6 +30,11 @@ const quotesLimit=rateLimit({windowMs:60000,limit:10,keyGenerator:req=>String(re
 router.get('/api/trips/options',auth,allow('viajes'),tripOptions);
 router.post('/api/trips/quote',auth,allow('viajes'),quotesLimit,quoteTrip);
 router.post("/api/trips", auth, allow('viajes'), tripsPost);
+router.post('/api/trips/:id/manual/:position/code', auth, admin, manualCorrectionCode);
+router.post('/api/trips/:id/manual/:position/unlock', auth, admin, manualCorrectionUnlock);
+router.post('/api/trips/:id/manual/:position/correct', auth, admin, uploadDocuments.array('files', 10), manualCorrectionSave);
+router.get('/api/trips/:id/manual', auth, admin, manualTripGet);
+router.post('/api/trips/:id/manual', auth, admin, uploadDocuments.array('files', 10), manualTripPost);
 router.get("/api/trips/:id", auth, allow("viajes"), tripGet);
 router.post("/api/trips/:id/events", auth, allow("viajes"), eventPost);
 router.post("/api/trips/:id/expenses", auth, allow("viajes"), upload.single("receipt"), expensePost);

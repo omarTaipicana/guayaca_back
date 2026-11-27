@@ -1,3 +1,5 @@
+import { acceptDocuments, keepSavedFields, notifyTripConflict } from '../services/tripConflict.service.js';
+import { hash } from '../services/tripControl.service.js';
 import {operationTransaction} from '../services/operationTransaction.service.js';
 import {inboxRows} from '../services/notificationInbox.service.js';
 import {accrueTrip} from '../services/standby.service.js';
@@ -18,8 +20,20 @@ export const gpsPost=wrap(async(req,res)=>{
   if(accuracy>MAX_ROUTE_ACCURACY)fail(`Precisión GPS insuficiente (${Math.round(accuracy)} m). Se necesita ${MAX_ROUTE_ACCURACY} m o mejor; espera señal al aire libre.`);
   const last=await Sample.findOne({where:{trip_id:t.id},order:[['device_at','DESC']],transaction});
   if(last&&at<=new Date(last.device_at)){if(req.sync){await Sample.findOrCreate({where:{trip_id:t.id,device_at:at},defaults:{latitude:lat,longitude:lng,accuracy,route_point},transaction});return {accepted:true,historical_only:true,reason:'Coordenada conservada; no se retroceden transiciones ya detectadas',status:t.status};}return {accepted:false,reason:'Lectura ya recibida o fuera de orden'};}
+  if (t.metadata?.manual_recorded_at && !t.metadata.driver_started_at) {
+   const latestManualEvent = Math.max(t.started_at ? +new Date(t.started_at) : 0,
+    ...stops.flatMap(stop => [stop.arrived_at, stop.departed_at, stop.received_at].filter(Boolean).map(value => +new Date(value))));
+   if (+at < latestManualEvent) {
+    await Sample.create({trip_id:t.id,latitude:lat,longitude:lng,accuracy,device_at:at,route_point},{transaction});
+    return {accepted:true,historical_only:true,status:t.status,reason:'Lectura anterior al último movimiento administrativo'};
+   }
+  }
   await Sample.create({trip_id:t.id,latitude:lat,longitude:lng,accuracy,device_at:at,route_point},{transaction});
-  if(t.status==='creado')await t.update({status:'en_curso',started_at:at},{transaction});
+  const startValues = t.status === 'creado' ? { status: 'en_curso', started_at: at } : {};
+  if (!t.metadata?.driver_started_at) {
+   startValues.metadata = { ...t.metadata, driver_started_at: at.toISOString() };
+  }
+  if (Object.keys(startValues).length) await t.update(startValues,{transaction});
   let transition=null;
   const candidate=gpsCandidate(stops,b);
   const reset={candidate_type:null,candidate_at:null,candidate_count:0};
@@ -57,27 +71,88 @@ export const gpsState=wrap(async(req,res)=>{
  const last_observed_at=await Sample.max('device_at',{where:{trip_id:t.id}});
  res.json({last_observed_at,stops:stops.map(s=>({...s.toJSON(),document_files:(s.arrival_file_ids?.length?s.arrival_file_ids:[s.arrival_file_id].filter(Boolean)).map(id=>documents.find(f=>String(f.id)===String(id))).filter(Boolean)})),samples,sample_count:Number(samples[0]?.total_samples||0),status:t.status});
 });
-export const completeStop=wrap(async(req,res)=>{
- validateId(req.params.id);validateId(req.params.stop);const t=await tripAccess(req,req.params.id);
- if(req.body.phase&&req.body.phase!=='arrival')fail('Registra kilometraje y documento una sola vez en el punto, desde la llegada.');
- const odometer=km(req.body.odometer);let documents=[],persisted=false;
- try{
-  documents=await storeDocuments(req);if(req.sync)req.sync.cleanup=()=>Promise.all(documents.map(removeDocument));
-  const result=await operationTransaction(req,async transaction=>{
-   const locked=await Trip.findByPk(t.id,{transaction,lock:transaction.LOCK.UPDATE});if(['finalizado','cancelado'].includes(locked.status))fail('Viaje cerrado');
-   const s=await Stop.findOne({where:{id:req.params.stop,trip_id:t.id},transaction,lock:transaction.LOCK.UPDATE});if(!s?.arrived_at)fail('Todavía no hay detección GPS de llegada',req.sync?409:400);
-   if(documented(s))fail('Este punto ya tiene kilometraje y documento registrados');if(req.sync&&new Date(req.sync.captured_at)<new Date(s.arrived_at)-120000)fail('El registro del documento es anterior a la llegada GPS; revisa el punto y la hora con el administrador',409);
-   const chronological=await Stop.findAll({where:{trip_id:t.id},transaction});
-   for(const row of chronological){if(String(row.id)===String(s.id)||row.arrival_odometer==null||!row.arrived_at)continue;if((new Date(row.arrived_at)<new Date(s.arrived_at)&&Number(row.arrival_odometer)>odometer)||(new Date(row.arrived_at)>new Date(s.arrived_at)&&Number(row.arrival_odometer)<odometer))fail('El kilometraje no es coherente con los otros puntos registrados del viaje');}
-   const files=[];for(const document of documents)files.push(await Attachment.create({...document,trip_id:t.id,category:s.position===0?'guia':'entrega'},{transaction}));const file=files[0];
-   // A late upload after confirmed delivery must preserve its original completion time.
-   await s.update({arrival_odometer:odometer,arrival_file_id:file.id,arrival_file_ids:files.map(f=>String(f.id)),...(s.position>0&&s.outcome==='pending'?{outcome:'delivered'}:{}),...(s.position>0&&!['partial','rejected','failed'].includes(s.outcome)&&!s.received_at?{received_at:req.sync?new Date(Math.max(+new Date(s.arrived_at),Math.min(+stopClock(locked,req),s.exit_state!=='waiting'&&s.outside_at?+new Date(s.outside_at):Infinity))):s.exit_state==='waiting'?stopClock(locked,req):(s.outside_at||stopClock(locked,req))}:{}),...(s.position>0&&s.outside_at&&!['partial','rejected','failed'].includes(s.outcome)?{departed_at:s.exit_state==='waiting'?stopClock(locked,req):s.outside_at,exit_state:['partial','rejected','failed'].includes(s.outcome)?'incident':'delivered',exit_history:history(s,'documented_after_exit',stopClock(locked,req),{user_id:req.user.id})}:{})},{transaction});
-   await accrueTrip(locked,transaction,stopClock(locked,req));if(!t.is_test)await recordMileage(t.vehicle_id,odometer,null,transaction);
-   if(!['pending','review'].includes(s.exit_state))await clearStopNotices(locked,s,transaction);
-   await Audit.create({user_id:req.user.id,action:'gps.documentado',details:{trip_id:t.id,stop_id:s.id,phase:'arrival',odometer,file_id:file.id,file_ids:files.map(f=>String(f.id))}},{transaction});
-   await finishTrip(locked,await Stop.findAll({where:{trip_id:t.id},order:[['position','ASC']],transaction}),transaction);return s;
-  });persisted=true;if(!t.is_test)await dispatchAlerts(t.vehicle_id);res.json(result);
- }catch(e){if(!persisted)await Promise.all(documents.map(removeDocument));throw e;}
+export const completeStop = wrap(async (req, res) => {
+  validateId(req.params.id);
+  validateId(req.params.stop);
+  const trip = await tripAccess(req, req.params.id);
+  if (req.body.phase && req.body.phase !== 'arrival') fail('Registra el documento desde la llegada.');
+  const odometer = km(req.body.odometer);
+  const documents = await storeDocuments(req);
+  const cleanup = () => Promise.all(documents.map(removeDocument));
+  if (req.sync) req.sync.cleanup = cleanup;
+  let persisted = false;
+  try {
+    const result = await operationTransaction(req, async transaction => {
+      const locked = await Trip.findByPk(trip.id, { transaction, lock: transaction.LOCK.UPDATE });
+      const stop = await Stop.findOne({ where: { id: req.params.stop, trip_id: trip.id }, transaction });
+      if (!stop?.arrived_at) fail('Todavía no hay detección GPS de llegada', req.sync ? 409 : 400);
+      const conflicts = [];
+      const values = keepSavedFields(stop, { arrival_odometer: odometer }, conflicts);
+      const documentsSaved = await acceptDocuments(stop, documents, conflicts, transaction);
+      const closed = ['finalizado', 'cancelado'].includes(locked.status);
+      if (closed && (locked.status === 'cancelado' || Object.keys(values).length || documentsSaved)) fail('Viaje cerrado');
+      if (conflicts.length) {
+        const operation = req.sync?.id ?? hash([odometer, (req.files ?? [req.file]).map(file => hash(file.buffer.toString('base64')))]);
+        await notifyTripConflict(locked, stop, conflicts, 'Registro del conductor', operation, transaction);
+      }
+      const hasMileage = values.arrival_odometer != null;
+      if (!hasMileage && !documentsSaved) return { ...stop.toJSON(), documents_saved: false };
+      if (req.sync && new Date(req.sync.captured_at) < new Date(stop.arrived_at) - 120000) {
+        fail('El registro del documento es anterior a la llegada GPS; revisa el punto y la hora con el administrador', 409);
+      }
+      const stops = await Stop.findAll({ where: { trip_id: trip.id }, order: [['position', 'ASC']], transaction });
+      const chronological = stops.filter(row => row.arrived_at)
+        .sort((a, b) => new Date(a.arrived_at) - new Date(b.arrived_at) || a.position - b.position);
+      if (hasMileage) {
+        const readings = chronological.flatMap(row => [
+          String(row.id) === String(stop.id) ? odometer : row.arrival_odometer, row.departure_odometer,
+        ]).filter(value => value != null).map(Number);
+        if (readings.some((value, index) => index > 0 && value < readings[index - 1])) {
+          fail('El kilometraje no es coherente con los otros puntos registrados del viaje');
+        }
+      }
+      if (documentsSaved) {
+        const files = await Attachment.bulkCreate(documents.map(document => ({
+          ...document, trip_id: trip.id, category: stop.position === 0 ? 'guia' : 'entrega',
+        })), { transaction });
+        values.arrival_file_id = files[0].id;
+        values.arrival_file_ids = files.map(file => String(file.id));
+      }
+      const at = stopClock(locked, req);
+      const incident = ['partial', 'rejected', 'failed'].includes(stop.outcome);
+      if (stop.position > 0 && !incident) {
+        if (stop.outcome === 'pending') values.outcome = 'delivered';
+        const leaving = stop.outside_at && stop.exit_state !== 'waiting';
+        const departure = stop.departed_at ?? (leaving ? stop.outside_at : stop.outside_at && at);
+        if (!stop.received_at) {
+          const observed = req.sync ? Math.max(+new Date(stop.arrived_at), Math.min(+at, departure ? +new Date(departure) : Infinity)) : +(leaving ? new Date(stop.outside_at) : at);
+          values.received_at = new Date(Math.min(observed, departure ? +new Date(departure) : Infinity));
+        }
+        if (!stop.departed_at && departure) {
+          values.departed_at = departure;
+          values.exit_state = 'delivered';
+          values.exit_history = history(stop, 'documented_after_exit', at, { user_id: req.user.id });
+        }
+      }
+      await stop.update(values, { transaction });
+      await accrueTrip(locked, transaction, at);
+      if (hasMileage && !trip.is_test) await recordMileage(trip.vehicle_id, odometer, null, transaction);
+      if (!['pending', 'review'].includes(stop.exit_state)) await clearStopNotices(locked, stop, transaction);
+      await Audit.create({ user_id: req.user.id, action: 'gps.documentado', details: {
+        trip_id: trip.id, stop_id: stop.id, phase: 'arrival', odometer: stop.arrival_odometer,
+        file_id: stop.arrival_file_id, file_ids: stop.arrival_file_ids,
+      } }, { transaction });
+      await finishTrip(locked, stops.map(row => String(row.id) === String(stop.id) ? stop : row), transaction);
+      return { ...stop.toJSON(), documents_saved: documentsSaved, mileage_saved: hasMileage };
+    });
+    persisted = !req.sync?.replayed && result.documents_saved;
+    if (!trip.is_test && !req.sync?.replayed && result.mileage_saved) {
+      await dispatchAlerts(trip.vehicle_id).catch(error => console.error('Alerta de mantenimiento:', error.message));
+    }
+    res.json(result);
+  } finally {
+    if (!persisted) await cleanup();
+  }
 });
 export const resolveExit=wrap(async(req,res)=>{
  validateId(req.params.id);validateId(req.params.stop);await tripAccess(req,req.params.id);
@@ -85,9 +160,13 @@ export const resolveExit=wrap(async(req,res)=>{
  if(!['delivered','waiting','review','incident'].includes(choice))fail('Selecciona si entregaste, sigues esperando o existe otra novedad');
  if(reason.length>1000||(['waiting','review'].includes(choice)&&reason.length<3))fail('Indica el motivo, máximo 1000 caracteres');
  const result=await operationTransaction(req,async transaction=>{
-  const t=await Trip.findByPk(req.params.id,{transaction,lock:transaction.LOCK.UPDATE});if(['finalizado','cancelado'].includes(t.status))fail('Viaje cerrado');
+  const t=await Trip.findByPk(req.params.id,{transaction,lock:transaction.LOCK.UPDATE});if(t.status==='cancelado')fail('Viaje cerrado');
   const s=await Stop.findOne({where:{id:req.params.stop,trip_id:t.id},transaction,lock:transaction.LOCK.UPDATE});
-  if(!s||s.position===0)fail('Punto de entrega no encontrado');if(s.departed_at)fail('La salida ya está cerrada; revisa la situación antes de reenviar',409);if(!s.outside_at)fail('Todavía no hay detección GPS de salida',req.sync?409:400);
+  if(!s||s.position===0)fail('Punto de entrega no encontrado');
+  if(s.departed_at){
+   if(s.exit_state!==choice)await notifyTripConflict(t,s,['exit_state'],'Registro del conductor',req.sync?.id??choice,transaction);
+   return s;
+  }if(t.status==='finalizado')fail('Viaje cerrado');if(!s.outside_at)fail('Todavía no hay detección GPS de salida',req.sync?409:400);
   if(choice==='incident'&&!['partial','rejected','failed'].includes(s.outcome))fail('Primero registra la incidencia de entrega');if(choice==='delivered'&&['partial','rejected','failed'].includes(s.outcome))fail('Esta entrega tiene una incidencia; selecciona salida con incidencia registrada');if(s.exit_state===choice)fail('Esta respuesta ya fue registrada');
   const at=stopClock(t,req),completedAt=s.exit_state==='waiting'?at:s.outside_at;await s.update({exit_state:choice,...(choice==='waiting'?{waiting_confirmed_at:at}:{}),exit_reason:reason||null,exit_history:history(s,'decision',at,{choice,reason,user_id:req.user.id}),...(choice==='delivered'?{received_at:s.received_at||completedAt,departed_at:completedAt}:choice==='incident'?{departed_at:completedAt}:{})},{transaction});
   await clearStopNotices(t,s,transaction);await remindStop(t,s,transaction,{force:true,at});await accrueTrip(t,transaction,at);

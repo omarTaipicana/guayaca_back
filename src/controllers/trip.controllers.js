@@ -1,7 +1,8 @@
+import Sample from '../models/GpsSample.js';
 import {visibleTrip,isAdmin} from '../services/tripVisibility.service.js';
 import {operationTransaction} from '../services/operationTransaction.service.js';
 import Stop from '../models/TripStop.js';
-import {tripProgress} from '../services/tripStop.service.js';
+import {manualPending, tripProgress} from '../services/tripStop.service.js';
 import {optimizeImage} from '../services/image.service.js';
 import Mode from '../models/TripMode.js';
 import {storeDocument,removeDocument} from '../services/document.service.js';
@@ -40,6 +41,13 @@ export const tripsGet = wrap(async (req, res) => {
     limit: 300,
   });
   const stops=trips.length?await Stop.findAll({where:{trip_id:{[Op.in]:trips.map(t=>t.id)}}}):[];
+  const gpsIds = isAdmin(req.user) ? trips.map(t => t.id) : [];
+  const gpsTimes = new Map(gpsIds.length ? (await Sample.findAll({
+    where: { trip_id: { [Op.in]: gpsIds } },
+    attributes: ['trip_id', [sequelize.fn('MIN', sequelize.col('device_at')), 'started'], [sequelize.fn('MAX', sequelize.col('device_at')), 'last']],
+    group: ['trip_id'],
+    raw: true,
+  })).map(row => [String(row.trip_id), row]) : []);
   res.json(
     trips.map((t) => {
       let x = t.get({ plain: true });
@@ -47,8 +55,21 @@ export const tripsGet = wrap(async (req, res) => {
       delete x.driverUser;
       delete x.vehicle;
       delete x.expenses;
+      const tripStops = stops.filter(stop => String(stop.trip_id) === String(t.id));
+      const places = x.metadata?.origin_place && x.metadata?.destination_places?.length
+        ? [x.metadata.origin_place, ...x.metadata.destination_places]
+        : [];
+      const manualProgress = isAdmin(req.user) && places.length
+        ? places.map((place, position) => ({
+          name: place.name,
+          missing: manualPending(tripStops.find(stop => stop.position === position)),
+        }))
+        : null;
       return visibleTrip({
-        ...x,operation_status:tripProgress(t,stops.filter(s=>String(s.trip_id)===String(t.id))),
+        ...x,operation_status:tripProgress(t,tripStops),
+        manual_progress: manualProgress,
+        driver_started_at: x.metadata?.driver_started_at ?? (t.status === 'en_curso' && !x.metadata?.manual_recorded_at ? gpsTimes.get(String(t.id))?.started : null) ?? null,
+        last_observed_at: gpsTimes.get(String(t.id))?.last ?? null,
         driver: [t.driverUser?.name, t.driverUser?.last_name].filter(Boolean).join(" "),
         plate: t.vehicle?.plate,
         expenses: sum.toFixed(2),
